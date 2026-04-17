@@ -30,10 +30,19 @@ echo "[install] branch:      $BRANCH"
 
 echo "[install] apt: installing system packages..."
 apt-get update -qq
+
+# Required - fail if any of these are missing.
 apt-get install -y --no-install-recommends \
     git python3 python3-pip python3-numpy \
     python3-opencv python3-rpi.gpio \
-    libatlas-base-dev libgl1 libglib2.0-0
+    libgl1
+
+# Optional - tolerate missing ones (names drift across Pi OS releases):
+#   libglib2.0-0 is now libglib2.0-0t64 on Bookworm/Trixie (apt auto-selects)
+#   libatlas-base-dev is gone on Trixie (not needed; modern numpy ships its own BLAS)
+for pkg in libglib2.0-0 libglib2.0-0t64 libatlas3-base libopenblas0; do
+    apt-get install -y --no-install-recommends "$pkg" 2>/dev/null || true
+done
 
 # Optional: opencv-contrib for WLS filter. Only install if not already present.
 if ! python3 -c "import cv2; cv2.ximgproc.createDisparityWLSFilter" >/dev/null 2>&1; then
