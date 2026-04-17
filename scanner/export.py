@@ -27,7 +27,8 @@ CSV_HEADERS = [
 
 
 def init_csv(save_dir):
-    """Create captures.csv with headers if absent. Idempotent."""
+    """Create save_dir and captures.csv with headers if absent. Idempotent."""
+    os.makedirs(save_dir, exist_ok=True)
     path = os.path.join(save_dir, "captures.csv")
     if not os.path.exists(path):
         with open(path, "w", newline="") as f:
