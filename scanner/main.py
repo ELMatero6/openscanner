@@ -27,8 +27,9 @@ from .config import (
     SCREEN_H, SCREEN_W, SETTINGS_FILE, SHUTDOWN_HOLD_S, VF_H,
 )
 from .export import (
-    fuse_plys, init_csv, save_capture, find_usb_drive,
-    usb_export, usb_writable, zip_export,
+    fuse_plys, init_csv, save_capture, usb_export, usb_find_block_device,
+    usb_format_vfat, usb_mount, usb_unmount_and_eject, usb_writable,
+    zip_export,
 )
 from .stereo import (
     build_live_matcher, build_matcher, compute_disparity,
@@ -120,17 +121,31 @@ def _do_local_zip(state, version, cal, log):
     threading.Thread(target=_bg, daemon=True).start()
 
 
+def _usb_format_confirm(win):
+    """Ask FORMAT / APPEND / CANCEL. Returns one of those keys."""
+    def setter(cb, st):
+        cv2.setMouseCallback(win, cb, st)
+    return confirm_dialog(
+        win,
+        [("USB drive options", C["white"]),
+         "FORMAT wipes the drive first (FAT32).",
+         "APPEND writes a new folder beside any",
+         "existing data on the drive."],
+        [("FORMAT",  C["red"],    "format"),
+         ("APPEND",  C["blue"],   "append"),
+         ("CANCEL",  C["dim"],    "cancel")],
+        setter,
+    )
+
+
 def _do_usb_export(win, state, version, cal, log):
-    """Kick off USB export in a background thread. Returns immediately.
+    """Detect + mount USB, optionally format, export, then eject. Async.
 
     The main loop watches state["usb_msg"] and shows the result dialog so
-    the UI stays responsive (camera keeps streaming, touches keep working)
-    during multi-minute copies.
+    the UI stays responsive during multi-minute copies.
     """
-    dev, mnt = find_usb_drive()
-    holder = {"cb": None, "state": None}
+    dev, parent, mnt = usb_find_block_device()
     def setter(cb, st):
-        holder["cb"] = cb; holder["state"] = st
         cv2.setMouseCallback(win, cb, st)
 
     if not dev:
@@ -142,16 +157,16 @@ def _do_usb_export(win, state, version, cal, log):
             [("OK", C["blue"], "ok")], setter)
         return
 
-    if not usb_writable(mnt):
-        log.warning("usb export: %s not writable", mnt)
-        confirm_dialog(win,
-            [("USB drive is not writable", C["red"]),
-             f"Mount: {mnt}",
-             "Check it isn't full or read-only."],
-            [("OK", C["blue"], "ok")], setter)
+    choice = _usb_format_confirm(win)
+    cv2.setMouseCallback(win, lambda *a, **k: None, None)
+    if choice == "cancel":
+        log.info("usb export: cancelled by user")
         return
 
-    log.info("usb export: starting (mount=%s)", mnt)
+    do_format = (choice == "format")
+    log.info("usb export: dev=%s parent=%s mnt=%s format=%s",
+             dev, parent, mnt, do_format)
+
     state["saving"] = True
     state["zip_pct"] = 0
     state["save_kind"] = "usb"
@@ -159,10 +174,35 @@ def _do_usb_export(win, state, version, cal, log):
 
     def _bg():
         try:
-            ok, msg = usb_export(SAVE_DIR, mnt, cal, version,
+            target = mnt
+            if do_format:
+                state["zip_pct"] = 5
+                if not usb_format_vfat(dev, parent, label="SCANNER"):
+                    state["usb_msg"] = (False, "Format failed - see log")
+                    return
+                target = None  # force remount below
+
+            if not target:
+                state["zip_pct"] = 10
+                target = usb_mount(dev)
+                if not target:
+                    state["usb_msg"] = (False, "Mount failed - see log")
+                    return
+
+            if not usb_writable(target):
+                state["usb_msg"] = (False, f"{target} not writable")
+                return
+
+            ok, msg = usb_export(SAVE_DIR, target, cal, version,
                                  progress_cb=lambda p: state.update(zip_pct=p))
-            state["usb_msg"] = (ok, msg)
             log.info("usb export: %s (%s)", "ok" if ok else "fail", msg)
+
+            if ok:
+                state["zip_pct"] = 100
+                ejected = usb_unmount_and_eject(dev, parent)
+                msg = (msg + "  -  Safe to unplug."
+                       if ejected else msg + "  -  NOT ejected; sync manually.")
+            state["usb_msg"] = (ok, msg)
         except Exception as e:
             state["usb_msg"] = (False, f"Error: {e}")
             log.exception("usb export: unexpected error")

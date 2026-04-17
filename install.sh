@@ -35,7 +35,8 @@ apt-get update -qq
 apt-get install -y --no-install-recommends \
     git python3 python3-pip python3-numpy \
     python3-opencv python3-rpi.gpio \
-    libgl1
+    libgl1 \
+    dosfstools udisks2
 
 # Optional - tolerate missing ones (names drift across Pi OS releases):
 #   libglib2.0-0 is now libglib2.0-0t64 on Bookworm/Trixie (apt auto-selects)
@@ -90,13 +91,27 @@ EOF
 systemctl daemon-reload
 systemctl enable openscanner.service
 
-# Allow the scanner user to shut the system down without a password.
+# Allow the scanner user to shut down + format USB drives without a password.
 SUDOERS=/etc/sudoers.d/openscanner
-if [[ ! -f "$SUDOERS" ]]; then
-    echo "$RUN_USER ALL=(root) NOPASSWD: /sbin/shutdown" > "$SUDOERS"
-    chmod 440 "$SUDOERS"
-    echo "[install] sudoers: $RUN_USER may shutdown without password"
-fi
+cat > "$SUDOERS" <<EOF
+$RUN_USER ALL=(root) NOPASSWD: /sbin/shutdown, /usr/sbin/mkfs.vfat, /sbin/mkfs.vfat, /bin/umount, /usr/bin/eject
+EOF
+chmod 440 "$SUDOERS"
+echo "[install] sudoers: $RUN_USER may shutdown / mkfs.vfat / umount / eject without password"
+
+# Stop the desktop file-manager from popping up a window every time a USB
+# drive is plugged in - that popup steals focus from the scanner's
+# fullscreen window and makes it look frozen.
+PCMANFM_DIR="/home/$RUN_USER/.config/pcmanfm/LXDE-pi"
+mkdir -p "$PCMANFM_DIR"
+cat > "$PCMANFM_DIR/pcmanfm.conf" <<EOF
+[volume]
+mount_on_startup=0
+mount_removable=0
+autorun=0
+EOF
+chown -R "$RUN_USER:$RUN_USER" "/home/$RUN_USER/.config/pcmanfm"
+echo "[install] pcmanfm: auto-mount popup disabled"
 
 echo
 echo "[install] done!"

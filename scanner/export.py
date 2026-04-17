@@ -3,8 +3,10 @@
 import csv
 import logging
 import os
+import re
 import shutil
 import subprocess
+import time
 import zipfile
 from datetime import datetime
 
@@ -286,20 +288,172 @@ def zip_export(save_dir, out_path, cal, version, progress_cb=None):
     return out_path
 
 
-def find_usb_drive():
-    """Return (device, mountpoint) of first removable mount, or (None, None)."""
+_USB_MOUNT_DIR = "/tmp/openscanner_usb"
+
+
+def _current_mount(dev):
+    """Return mountpoint for a block device, or None."""
     try:
         with open("/proc/mounts") as f:
             for line in f:
                 parts = line.split()
-                dev, mnt = parts[0], parts[1]
-                if not dev.startswith("/dev/sd"):
-                    continue
-                if any(mnt.startswith(p) for p in ("/media", "/mnt", "/run/media")):
-                    return dev, mnt
+                if parts[0] == dev:
+                    return parts[1]
     except Exception:
         pass
-    return None, None
+    return None
+
+
+def usb_find_block_device():
+    """Locate a removable USB block device.
+
+    Returns (dev, parent, mountpoint_or_None). dev is the partition
+    (e.g. /dev/sda1) if present, else the raw disk (/dev/sda). parent
+    is always the raw disk - used for eject/power-off.
+    """
+    try:
+        blocks = sorted(os.listdir("/sys/block"))
+    except Exception:
+        return None, None, None
+
+    for blk in blocks:
+        if not blk.startswith("sd"):
+            continue
+        try:
+            with open(f"/sys/block/{blk}/removable") as f:
+                if f.read().strip() != "1":
+                    continue
+        except Exception:
+            continue
+        try:
+            parts = [p for p in os.listdir(f"/sys/block/{blk}")
+                     if p.startswith(blk) and p != blk]
+        except Exception:
+            parts = []
+        dev = f"/dev/{sorted(parts)[0]}" if parts else f"/dev/{blk}"
+        parent = f"/dev/{blk}"
+        return dev, parent, _current_mount(dev)
+    return None, None, None
+
+
+# Kept for backward compat with older call sites.
+def find_usb_drive():
+    dev, _, mnt = usb_find_block_device()
+    return dev, mnt
+
+
+def usb_mount(dev):
+    """Mount dev via udisksctl (polkit - no sudo needed on the Pi).
+
+    Returns the mountpoint, or None on failure.
+    """
+    existing = _current_mount(dev)
+    if existing:
+        return existing
+    try:
+        r = subprocess.run(
+            ["udisksctl", "mount", "-b", dev, "--no-user-interaction"],
+            capture_output=True, text=True, timeout=20,
+        )
+        if r.returncode == 0:
+            for token in r.stdout.split():
+                t = token.rstrip(".")
+                if t.startswith(("/media", "/run/media")):
+                    log.info("usb mount: %s -> %s", dev, t)
+                    return t
+        log.warning("udisksctl mount failed (rc=%d): %s",
+                    r.returncode, r.stderr.strip() or r.stdout.strip())
+    except Exception as e:
+        log.warning("udisksctl mount error: %s", e)
+
+    # Fallback: sudo mount to /tmp
+    try:
+        os.makedirs(_USB_MOUNT_DIR, exist_ok=True)
+        uid = os.getuid()
+        r = subprocess.run(
+            ["sudo", "mount", "-o", f"uid={uid},gid={uid}", dev, _USB_MOUNT_DIR],
+            capture_output=True, text=True, timeout=20,
+        )
+        if r.returncode == 0:
+            log.info("usb mount (fallback): %s -> %s", dev, _USB_MOUNT_DIR)
+            return _USB_MOUNT_DIR
+        log.warning("mount fallback failed: %s", r.stderr.strip())
+    except Exception as e:
+        log.warning("mount fallback error: %s", e)
+    return None
+
+
+def usb_unmount_and_eject(dev, parent):
+    """Flush, unmount, and power-off the parent disk. Safe to unplug after."""
+    try:
+        subprocess.run(["sync"], timeout=10)
+    except Exception:
+        pass
+    # Try udisksctl first
+    for cmd in (
+        ["udisksctl", "unmount", "-b", dev, "--no-user-interaction"],
+        ["sudo", "umount", dev],
+    ):
+        try:
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+            if r.returncode == 0:
+                log.info("usb unmount: %s via %s", dev, cmd[0])
+                break
+        except Exception as e:
+            log.warning("unmount (%s): %s", cmd[0], e)
+    # Power-off the parent so the kernel drops the device
+    for cmd in (
+        ["udisksctl", "power-off", "-b", parent, "--no-user-interaction"],
+        ["sudo", "eject", parent],
+    ):
+        try:
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+            if r.returncode == 0:
+                log.info("usb eject: %s via %s", parent, cmd[0])
+                return True
+        except Exception as e:
+            log.warning("eject (%s): %s", cmd[0], e)
+    return False
+
+
+def usb_format_vfat(dev, parent, label="SCANNER"):
+    """Unmount and re-format dev as FAT32. Destructive."""
+    if _current_mount(dev):
+        try:
+            subprocess.run(
+                ["udisksctl", "unmount", "-b", dev, "--no-user-interaction"],
+                capture_output=True, text=True, timeout=15,
+            )
+        except Exception:
+            pass
+        try:
+            subprocess.run(["sudo", "umount", dev],
+                           capture_output=True, text=True, timeout=15)
+        except Exception:
+            pass
+    # FAT32 labels max 11 ASCII uppercase chars
+    safe = re.sub(r"[^A-Z0-9_]", "", label.upper())[:11] or "SCANNER"
+    log.info("usb format: mkfs.vfat -F 32 -n %s %s", safe, dev)
+    try:
+        r = subprocess.run(
+            ["sudo", "mkfs.vfat", "-F", "32", "-n", safe, dev],
+            capture_output=True, text=True, timeout=180,
+        )
+        if r.returncode != 0:
+            log.error("mkfs.vfat failed (rc=%d): %s",
+                      r.returncode, r.stderr.strip() or r.stdout.strip())
+            return False
+    except Exception as e:
+        log.error("mkfs.vfat error: %s", e)
+        return False
+    # Give the kernel a moment to re-read the partition
+    time.sleep(1.5)
+    try:
+        subprocess.run(["sudo", "partprobe", parent],
+                       capture_output=True, text=True, timeout=10)
+    except Exception:
+        pass
+    return True
 
 
 def usb_writable(mnt):
@@ -323,9 +477,9 @@ def usb_disk_free_mb(mnt):
 
 
 def usb_export(save_dir, mnt, cal, version, progress_cb=None):
-    """Copy scans + calibration + zip + README to USB. Returns (ok, message).
+    """Copy scans + calibration + zip + README to a mounted drive.
 
-    Does NOT format. Caller must verify usb_writable() first.
+    Returns (ok, message). Caller handles mount/unmount/eject.
     """
     if not usb_writable(mnt):
         return False, "USB drive is read-only or full"
@@ -362,7 +516,7 @@ def usb_export(save_dir, mnt, cal, version, progress_cb=None):
 
         # Best effort sync - don't fail if no permission
         try:
-            subprocess.run(["sync"], timeout=5)
+            subprocess.run(["sync"], timeout=10)
         except Exception:
             pass
 
