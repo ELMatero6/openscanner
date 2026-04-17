@@ -24,7 +24,7 @@ from .config import (
     AUTO_INTERVAL, BTN_Y, C, CALIBRATION_FILE, CAMERA_INDEX,
     CAPTURE_HEIGHT, CAPTURE_WIDTH, DEFAULT_BASELINE_MM, DIST_ORDER,
     DIST_PRESETS, FONT, GPIO_PIN, PANEL_W, PREVIEW_H, SAVE_DIR,
-    SCREEN_H, SCREEN_W, SETTINGS_FILE, SHUTDOWN_HOLD_S,
+    SCREEN_H, SCREEN_W, SETTINGS_FILE, SHUTDOWN_HOLD_S, VF_H,
 )
 from .export import (
     fuse_plys, init_csv, save_capture, find_usb_drive,
@@ -293,7 +293,7 @@ def run():
 
             # Live BG removal: mask the viewfinder using rf_disp upscaled
             if state["bg_thresh"] is not None:
-                disp_up = cv2.resize(rf_disp, (PANEL_W, PREVIEW_H))
+                disp_up = cv2.resize(rf_disp, (PANEL_W, VF_H))
                 mask = (disp_up >= state["bg_thresh"] * 0.85).astype(np.uint8)
                 kern = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
                 mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kern)
@@ -437,7 +437,7 @@ def run():
                                      cv2.NORM_MINMAX).astype(np.uint8)
             cov_col = cv2.applyColorMap(cov_norm, cv2.COLORMAP_TURBO)
             cov_col[coverage_acc <= 0] = 0
-            right_panel = cv2.resize(cov_col, (PANEL_W, PREVIEW_H))
+            right_panel = cv2.resize(cov_col, (PANEL_W, VF_H))
             cv2.putText(right_panel, f"Coverage  ({coverage_cnt} shots)",
                         (8, 20), FONT, 0.45, (255, 255, 255), 1)
             state["has_disp"] = True

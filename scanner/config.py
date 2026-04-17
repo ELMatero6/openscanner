@@ -12,12 +12,28 @@ GPIO_PIN         = 17
 AUTO_INTERVAL    = 0.8
 SHUTDOWN_HOLD_S  = 3.0
 
+# Overall screen
 SCREEN_W  = 800
 SCREEN_H  = 480
 PANEL_W   = SCREEN_W // 2
-PREVIEW_H = 340
-BTN_Y     = PREVIEW_H
-BTN_H     = SCREEN_H - PREVIEW_H
+
+# Main-UI chrome (Pocket-PC / Win9x toolgun look)
+TITLE_H   = 24            # navy caption bar at top
+NAV_H     = 24            # white "hyperlink" bar below caption
+VF_Y      = TITLE_H + NAV_H        # viewfinder top (48)
+STATS_H   = 20            # olive-green debug stats strip
+PREVIEW_H = 340           # top-area height (used by calibration + viewer too)
+VF_H      = PREVIEW_H - VF_Y - STATS_H   # viewfinder height in main UI (248)
+STATS_Y   = VF_Y + VF_H                  # olive strip Y (296)
+
+# Bottom button bar
+BTN_Y     = PREVIEW_H                # 340
+BTN_H     = SCREEN_H - PREVIEW_H     # 140
+
+# Nav-bar hit regions (touch targets for 3D / Power / Cal links)
+NAV_3D_X,  NAV_3D_W  = 0,   170
+NAV_PWR_X, NAV_PWR_W = 500, 140
+NAV_CAL_X, NAV_CAL_W = 640, 160
 
 DEFAULT_BASELINE_MM = 60.0
 DISP_SCALE = 0.5
@@ -29,9 +45,12 @@ DIST_PRESETS = {
 }
 DIST_ORDER = ["CLOSE", "MED", "FAR"]
 
-FONT = cv2.FONT_HERSHEY_SIMPLEX
+FONT      = cv2.FONT_HERSHEY_SIMPLEX
+MONO_FONT = cv2.FONT_HERSHEY_PLAIN       # narrower, terminal-ish
 
+# BGR colours
 C = {
+    # functional (legacy keys - kept so nothing else breaks)
     "bg":     (15,  15,  15),
     "panel":  (25,  25,  25),
     "white":  (240, 240, 240),
@@ -44,6 +63,20 @@ C = {
     "teal":   (160, 190, 30),
     "grey":   (100, 100, 100),
     "purple": (180, 60,  160),
+    # toolgun / Win9x palette
+    "navy":        (128, 0,   0),        # title bar
+    "navy_soft":   (152, 32,  32),       # nav link hover
+    "win_body":    (200, 200, 200),      # chrome grey
+    "win_face":    (212, 212, 212),      # button face
+    "win_hi":      (248, 248, 248),      # bevel highlight
+    "win_sh":      (128, 128, 128),      # bevel shadow
+    "win_dk":      (64,  64,  64),       # outer dark
+    "link":        (200, 80,  0),        # hyperlink blue
+    "link_visit":  (140, 40,  140),      # visited purple
+    "cream":       (220, 232, 245),      # pill background
+    "olive_bg":    (80,  110, 80),       # debug strip bg
+    "olive_txt":   (170, 220, 180),      # debug strip text
+    "black":       (0,   0,   0),
 }
 
 BTN_W = SCREEN_W // 4
@@ -54,14 +87,7 @@ BTNS = [
     ("clear", "CLEAR",  "red",    "dim"),
 ]
 
+# Legacy aliases - unused in the new UI, kept because calibration.py imports them.
 CAL_W, CAL_H = 80, 34
 CAL_X = PANEL_W - CAL_W - 4
 CAL_Y = 4
-
-VIEW_W, VIEW_H = 60, 34
-VIEW_X = 4
-VIEW_Y = 4
-
-PWR_W, PWR_H = 50, 34
-PWR_X = PANEL_W - CAL_W - PWR_W - 10
-PWR_Y = 4

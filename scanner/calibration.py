@@ -9,8 +9,7 @@ import numpy as np
 
 from . import logger as log_mod
 from .config import (
-    BTN_H, BTN_Y, C, CAL_X, CAL_Y, CAL_W, CAL_H,
-    FONT, GPIO_PIN, PANEL_W, PREVIEW_H, SCREEN_H, SCREEN_W,
+    BTN_H, BTN_Y, C, FONT, GPIO_PIN, PANEL_W, PREVIEW_H, SCREEN_H, SCREEN_W,
 )
 
 log = log_mod.get("scanner.calibration")
@@ -144,8 +143,8 @@ def run_wizard(cap, actual_w, actual_h, win, cal_path, gpio_ok, gpio_in):
 
         canvas = np.zeros((SCREEN_H, SCREEN_W, 3), np.uint8)
         from .ui import fit_to_panel
-        canvas[:PREVIEW_H, :PANEL_W] = fit_to_panel(left)
-        canvas[:PREVIEW_H, PANEL_W:] = fit_to_panel(right)
+        canvas[:PREVIEW_H, :PANEL_W] = fit_to_panel(left, target_h=PREVIEW_H)
+        canvas[:PREVIEW_H, PANEL_W:] = fit_to_panel(right, target_h=PREVIEW_H)
         cv2.line(canvas, (PANEL_W, 0), (PANEL_W, PREVIEW_H), C["grey"], 1)
 
         det_col = C["green"] if both else C["red"]
