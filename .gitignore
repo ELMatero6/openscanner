@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+scans/
+cal_pairs/
+stereo_calibration.npz
+.settings
+scans__*.zip
+*.ply
+*.log
+.vscode/
+.idea/
