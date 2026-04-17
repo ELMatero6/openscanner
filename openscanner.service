@@ -1,0 +1,17 @@
+[Unit]
+Description=openscanner stereo 3D scanner
+After=multi-user.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pi
+WorkingDirectory=/opt/openscanner
+ExecStart=/usr/bin/env bash /opt/openscanner/update.sh
+Restart=on-failure
+RestartSec=5
+Environment=DISPLAY=:0
+Environment=XAUTHORITY=/home/pi/.Xauthority
+
+[Install]
+WantedBy=multi-user.target
