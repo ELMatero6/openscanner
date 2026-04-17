@@ -249,50 +249,62 @@ def run():
 
     log.info("ready - entering capture loop")
 
+    left = right = None
+    left_panel = make_empty_right_panel("Camera starting...", "")
+    rf_disp = np.zeros((120, 160), dtype=np.float32)
+    cam_fail_count = 0
+
     while True:
         ret, frame = cap.read()
-        if not ret:
-            time.sleep(0.03); continue
+        now = time.time()
 
-        now   = time.time()
-        mid   = frame.shape[1] // 2
-        left  = frame[:, :mid]
-        right = frame[:, mid:]
+        if ret:
+            cam_fail_count = 0
+            mid   = frame.shape[1] // 2
+            left  = frame[:, :mid]
+            right = frame[:, mid:]
 
-        if state["cal"]:
-            left, right = rectify(left, right, state["cal"])
+            if state["cal"]:
+                left, right = rectify(left, right, state["cal"])
 
-        # Viewfinder = rectified left eye, letterboxed
-        left_panel = fit_to_panel(left)
+            # Viewfinder = rectified left eye, letterboxed
+            left_panel = fit_to_panel(left)
 
-        # Live rangefinder + BG mask source - cheap matcher at 160x120
-        RF_W, RF_H = 160, 120
-        gl_rf = cv2.resize(cv2.cvtColor(left,  cv2.COLOR_BGR2GRAY), (RF_W, RF_H))
-        gr_rf = cv2.resize(cv2.cvtColor(right, cv2.COLOR_BGR2GRAY), (RF_W, RF_H))
-        rf_disp = live_m.compute(gl_rf, gr_rf).astype(np.float32) / 16.0
+            # Live rangefinder + BG mask source - cheap matcher at 160x120
+            RF_W, RF_H = 160, 120
+            gl_rf = cv2.resize(cv2.cvtColor(left,  cv2.COLOR_BGR2GRAY), (RF_W, RF_H))
+            gr_rf = cv2.resize(cv2.cvtColor(right, cv2.COLOR_BGR2GRAY), (RF_W, RF_H))
+            rf_disp = live_m.compute(gl_rf, gr_rf).astype(np.float32) / 16.0
 
-        # Distance at crosshair - resolution-independent sampling
-        d_at_cross = sample_disp_at(rf_disp, 0.5, 0.5, 0.08)
-        if d_at_cross and d_at_cross > 0 and state["cal"]:
-            # focal_px scales with image; at RF_W the focal is focal_full * RF_W/full
-            f_rf = state["cal"]["focal_px"] * (RF_W / (actual_w // 2))
-            raw_m = (state["cal"]["baseline_mm"] / 1000.0 * f_rf) / d_at_cross
-            if 0.10 <= raw_m <= 8.0:
-                rf_buffer.append(raw_m)
-                if len(rf_buffer) > 8:
-                    rf_buffer.pop(0)
-        if rf_buffer:
-            state["crosshair_dist_m"] = round(float(np.median(rf_buffer)), 2)
+            # Distance at crosshair - resolution-independent sampling
+            d_at_cross = sample_disp_at(rf_disp, 0.5, 0.5, 0.08)
+            if d_at_cross and d_at_cross > 0 and state["cal"]:
+                # focal_px scales with image; at RF_W the focal is focal_full * RF_W/full
+                f_rf = state["cal"]["focal_px"] * (RF_W / (actual_w // 2))
+                raw_m = (state["cal"]["baseline_mm"] / 1000.0 * f_rf) / d_at_cross
+                if 0.10 <= raw_m <= 8.0:
+                    rf_buffer.append(raw_m)
+                    if len(rf_buffer) > 8:
+                        rf_buffer.pop(0)
+            if rf_buffer:
+                state["crosshair_dist_m"] = round(float(np.median(rf_buffer)), 2)
+            else:
+                state["crosshair_dist_m"] = None
+
+            # Live BG removal: mask the viewfinder using rf_disp upscaled
+            if state["bg_thresh"] is not None:
+                disp_up = cv2.resize(rf_disp, (PANEL_W, PREVIEW_H))
+                mask = (disp_up >= state["bg_thresh"] * 0.85).astype(np.uint8)
+                kern = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
+                mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kern)
+                left_panel = (left_panel * mask[:, :, None]).astype(np.uint8)
         else:
-            state["crosshair_dist_m"] = None
-
-        # Live BG removal: mask the viewfinder using rf_disp upscaled
-        if state["bg_thresh"] is not None:
-            disp_up = cv2.resize(rf_disp, (PANEL_W, PREVIEW_H))
-            mask = (disp_up >= state["bg_thresh"] * 0.85).astype(np.uint8)
-            kern = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
-            mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kern)
-            left_panel = (left_panel * mask[:, :, None]).astype(np.uint8)
+            # Camera read failed - common during heavy USB writes sharing the bus.
+            # Keep UI/state/touches alive with the last good viewfinder so we don't
+            # freeze on an overlay and miss async completion dialogs.
+            cam_fail_count += 1
+            if cam_fail_count in (10, 100, 500):
+                log.warning("camera read returning no frame (count=%d)", cam_fail_count)
 
         # GPIO
         gpio_now = _gpio_low()
@@ -399,11 +411,11 @@ def run():
                     [("OK", C["blue"], "ok")], _setter)
                 cv2.setMouseCallback(WIN, on_touch, touch)
 
-        # Capture trigger
+        # Capture trigger - only when we have fresh L/R frames
         do_capture = False
-        if state["mode"] == "semi" and gpio_trigger:
+        if ret and state["mode"] == "semi" and gpio_trigger:
             do_capture = True
-        elif state["mode"] == "auto" and gpio_now and now - last_auto >= AUTO_INTERVAL:
+        elif ret and state["mode"] == "auto" and gpio_now and now - last_auto >= AUTO_INTERVAL:
             do_capture = True
 
         if do_capture:
