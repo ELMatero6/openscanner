@@ -72,10 +72,10 @@ def _status_bar(canvas, state, sys):
         col = C["red"] if v >= hi else C["yellow"] if v >= mid else C["white"]
         parts.append((f"{lbl}:{v}%", col))
 
-    x = PANEL_W - 4
+    x = SCREEN_W - 4
     for txt, col in reversed(parts):
         (tw, _), _ = cv2.getTextSize(txt, FONT, 0.42, 1)
-        x -= tw + 6
+        x -= tw + 8
         cv2.putText(canvas, txt, (x, PREVIEW_H - 7), FONT, 0.42, col, 1)
 
 

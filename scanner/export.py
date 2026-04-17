@@ -1,6 +1,7 @@
 """Capture I/O: CSV manifest, PNG images, PLY point clouds, zip + USB export."""
 
 import csv
+import logging
 import os
 import shutil
 import subprocess
@@ -12,6 +13,8 @@ import numpy as np
 
 from .config import CALIBRATION_FILE, DISP_SCALE, SAVE_DIR
 from .stereo import XIMGPROC
+
+log = logging.getLogger("scanner.export")
 
 
 CSV_HEADERS = [
@@ -187,7 +190,7 @@ def fuse_plys(save_dir, output_path, max_total_points=2_000_000):
             xyz, rgb = _read_ply(os.path.join(save_dir, fname))
             all_xyz.append(xyz); all_rgb.append(rgb)
         except Exception as e:
-            print(f"[FUSE] skip {fname}: {e}")
+            log.warning("fuse: skip %s (%s)", fname, e)
     if not all_xyz:
         return False
     xyz = np.concatenate(all_xyz)

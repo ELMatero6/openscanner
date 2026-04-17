@@ -17,6 +17,7 @@ except Exception:
     GPIO_OK = False
 
 from . import __version__
+from . import logger as log_mod
 from . import settings as settings_mod
 from .calibration import load_calibration, rectify, run_wizard
 from .config import (
@@ -52,7 +53,6 @@ def _open_camera():
         if cap.isOpened():
             return cap
         cap.release()
-        print(f"[CAM] open failed, retry {attempt + 1}/3")
         time.sleep(1.0)
     return None
 
@@ -98,23 +98,35 @@ def _save_destination(win):
     )
 
 
-def _do_local_zip(state, version, cal):
+def _do_local_zip(state, version, cal, log):
     out = f"{SAVE_DIR}__{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip"
-    state["saving"] = True; state["zip_pct"] = 0
+    state["saving"] = True
+    state["zip_pct"] = 0
+    state["save_kind"] = "zip"
+    state.pop("zip_msg", None)
+    log.info("local zip: starting -> %s", out)
     def _bg():
         try:
             zip_export(SAVE_DIR, out, cal, version,
                        progress_cb=lambda p: state.update(zip_pct=p))
             state["zip_done"] = out
-            print(f"[ZIP] {out}")
+            state["zip_msg"] = (True, out)
+            log.info("local zip: done -> %s", out)
         except Exception as e:
-            print(f"[ZIP ERROR] {e}")
+            state["zip_msg"] = (False, str(e))
+            log.exception("local zip: failed")
         finally:
             state["saving"] = False
     threading.Thread(target=_bg, daemon=True).start()
 
 
-def _do_usb_export(win, state, version, cal):
+def _do_usb_export(win, state, version, cal, log):
+    """Kick off USB export in a background thread. Returns immediately.
+
+    The main loop watches state["usb_msg"] and shows the result dialog so
+    the UI stays responsive (camera keeps streaming, touches keep working)
+    during multi-minute copies.
+    """
     dev, mnt = find_usb_drive()
     holder = {"cb": None, "state": None}
     def setter(cb, st):
@@ -122,6 +134,7 @@ def _do_usb_export(win, state, version, cal):
         cv2.setMouseCallback(win, cb, st)
 
     if not dev:
+        log.warning("usb export: no drive detected")
         confirm_dialog(win,
             [("No USB drive detected", C["red"]),
              "Plug in a USB drive (FAT32/exFAT/ext4)",
@@ -130,6 +143,7 @@ def _do_usb_export(win, state, version, cal):
         return
 
     if not usb_writable(mnt):
+        log.warning("usb export: %s not writable", mnt)
         confirm_dialog(win,
             [("USB drive is not writable", C["red"]),
              f"Mount: {mnt}",
@@ -137,46 +151,46 @@ def _do_usb_export(win, state, version, cal):
             [("OK", C["blue"], "ok")], setter)
         return
 
-    state["saving"] = True; state["zip_pct"] = 0
+    log.info("usb export: starting (mount=%s)", mnt)
+    state["saving"] = True
+    state["zip_pct"] = 0
+    state["save_kind"] = "usb"
+    state.pop("usb_msg", None)
+
     def _bg():
         try:
             ok, msg = usb_export(SAVE_DIR, mnt, cal, version,
                                  progress_cb=lambda p: state.update(zip_pct=p))
             state["usb_msg"] = (ok, msg)
-            print(f"[USB] {msg}")
+            log.info("usb export: %s (%s)", "ok" if ok else "fail", msg)
+        except Exception as e:
+            state["usb_msg"] = (False, f"Error: {e}")
+            log.exception("usb export: unexpected error")
         finally:
             state["saving"] = False
     threading.Thread(target=_bg, daemon=True).start()
 
-    while state["saving"]:
-        cv2.waitKey(100)
-
-    ok, msg = state.get("usb_msg", (False, "Unknown"))
-    confirm_dialog(win,
-        [(("Export complete!" if ok else "Export failed"),
-          C["green"] if ok else C["red"]),
-         msg,
-         "Safe to unplug USB drive."],
-        [("OK", C["blue"], "ok")], setter)
-
 
 def run():
-    print("=" * 50)
-    print(f"  openscanner v{__version__}  ({git_sha()})")
-    print(f"  save dir: {SAVE_DIR}/")
-    print(f"  GPIO:     {'pin ' + str(GPIO_PIN) if GPIO_OK else 'not available'}")
-    print("=" * 50)
-
     settings = settings_mod.load(SETTINGS_FILE)
+    log_path = log_mod.init(SAVE_DIR, settings.get("log_level", "INFO"))
+    log = log_mod.get("scanner.main")
+
+    log.info("=" * 60)
+    log.info("openscanner v%s  (%s)", __version__, git_sha())
+    log.info("save dir: %s  log: %s", SAVE_DIR, log_path)
+    log.info("GPIO: %s", f"pin {GPIO_PIN}" if GPIO_OK else "not available")
+    log.info("settings: %s", settings)
+    log.info("=" * 60)
 
     cap = _open_camera()
     if cap is None:
-        print("[FATAL] camera unavailable after 3 tries")
+        log.error("camera unavailable after 3 tries - exiting")
         return
 
     actual_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     actual_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    print(f"[CAM]  {actual_w}x{actual_h}")
+    log.info("camera open: %dx%d", actual_w, actual_h)
 
     cal = load_calibration(CALIBRATION_FILE, (actual_w // 2, actual_h))
 
@@ -233,7 +247,7 @@ def run():
     gpio_press_time = 0.0
     rf_buffer       = []
 
-    print(f"[READY] settings={settings}")
+    log.info("ready - entering capture loop")
 
     while True:
         ret, frame = cap.read()
@@ -306,31 +320,31 @@ def run():
             if state["bg_thresh"] is not None:
                 state["bg_thresh"] = None
                 settings["bg_on"] = False
+                log.info("bg removal: off")
             else:
                 t = sample_disp_at(rf_disp, 0.5, 0.5, 0.08)
                 if t and t > 0:
                     state["bg_thresh"] = t
                     settings["bg_on"] = True
-                    print(f"[BG] threshold={t:.2f}")
+                    log.info("bg removal: on (threshold=%.2f)", t)
                 else:
-                    print("[BG] no valid depth at crosshair")
+                    log.warning("bg removal: no valid depth at crosshair")
             settings_mod.save(SETTINGS_FILE, settings)
 
         elif action == "save":
             if state["captures"] == 0:
-                print("[SAVE] nothing to save")
+                log.info("save: nothing to save")
             elif not state["saving"]:
                 dest = _save_destination(WIN)
                 cv2.setMouseCallback(WIN, on_touch, touch)
                 if dest == "local":
                     settings["last_save_dest"] = "local"
                     settings_mod.save(SETTINGS_FILE, settings)
-                    _do_local_zip(state, __version__, state["cal"])
+                    _do_local_zip(state, __version__, state["cal"], log)
                 elif dest == "usb":
                     settings["last_save_dest"] = "usb"
                     settings_mod.save(SETTINGS_FILE, settings)
-                    _do_usb_export(WIN, state, __version__, state["cal"])
-                    cv2.setMouseCallback(WIN, on_touch, touch)
+                    _do_usb_export(WIN, state, __version__, state["cal"], log)
 
         elif action == "clear":
             state["captures"] = 0
@@ -361,6 +375,29 @@ def run():
             if _confirm_shutdown(WIN):
                 shutdown(); return
             cv2.setMouseCallback(WIN, on_touch, touch)
+
+        # Show the result dialog for an async save when the worker finishes.
+        # We only pop this when saving is False so progress overlay stays smooth.
+        if not state["saving"]:
+            def _setter(cb, st):
+                cv2.setMouseCallback(WIN, cb, st)
+            if "usb_msg" in state:
+                ok, msg = state.pop("usb_msg")
+                confirm_dialog(WIN,
+                    [(("Export complete!" if ok else "Export failed"),
+                      C["green"] if ok else C["red"]),
+                     msg,
+                     ("Safe to unplug USB drive." if ok else "")],
+                    [("OK", C["blue"], "ok")], _setter)
+                cv2.setMouseCallback(WIN, on_touch, touch)
+            elif "zip_msg" in state:
+                ok, msg = state.pop("zip_msg")
+                confirm_dialog(WIN,
+                    [(("Zip complete!" if ok else "Zip failed"),
+                      C["green"] if ok else C["red"]),
+                     (os.path.basename(msg) if ok else msg)],
+                    [("OK", C["blue"], "ok")], _setter)
+                cv2.setMouseCallback(WIN, on_touch, touch)
 
         # Capture trigger
         do_capture = False
@@ -409,11 +446,16 @@ def run():
                     save_disp  = disp * mask
 
             idx = state["captures"] + 1
-            save_capture(SAVE_DIR, idx, save_left, save_right, save_disp,
-                         state["cal"], state, csv_path)
+            meta = save_capture(SAVE_DIR, idx, save_left, save_right, save_disp,
+                                state["cal"], state, csv_path)
             state["captures"] = idx
             state["flash_until"] = now + 0.15
-            print(f"[CAPTURE] #{idx}")
+            valid_px = int((save_disp > 0).sum())
+            total_px = int(save_disp.size)
+            cov = 100.0 * valid_px / max(total_px, 1)
+            log.info("capture #%d  coverage=%.1f%%  dist=%s  ply=%s",
+                     idx, cov, state["dist_mode"],
+                     "yes" if meta and meta.get("PLY") and state["cal"] else "no")
 
         sys_holder.setdefault("temp", None)
         draw_ui(canvas, state, left_panel, right_panel, sys_holder)
@@ -427,4 +469,4 @@ def run():
     cv2.destroyAllWindows()
     if GPIO_OK:
         GPIO.cleanup()
-    print("[DONE]")
+    log.info("shutdown clean")

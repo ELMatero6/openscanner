@@ -7,10 +7,13 @@ import threading
 import cv2
 import numpy as np
 
+from . import logger as log_mod
 from .config import (
     BTN_H, BTN_Y, C, CAL_X, CAL_Y, CAL_W, CAL_H,
     FONT, GPIO_PIN, PANEL_W, PREVIEW_H, SCREEN_H, SCREEN_W,
 )
+
+log = log_mod.get("scanner.calibration")
 
 
 def load_calibration(path, fallback_size):

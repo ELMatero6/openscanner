@@ -11,6 +11,7 @@ DEFAULTS = {
     "screen_rotate":  0,
     "last_save_dest": "local",
     "viewer_subsample": 60000,
+    "log_level":      "INFO",
 }
 
 
