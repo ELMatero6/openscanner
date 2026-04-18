@@ -10,7 +10,6 @@
 #   sudo ./install.sh
 #
 # Re-running is safe (idempotent).
-
 set -euo pipefail
 
 REPO_URL="${OPENSCANNER_REPO:-https://github.com/elmatero6/openscanner.git}"
@@ -36,7 +35,7 @@ apt-get install -y --no-install-recommends \
     git python3 python3-pip python3-numpy \
     python3-opencv python3-rpi.gpio \
     libgl1 \
-    dosfstools udisks2
+    dosfstools udisks2 xvfb
 
 # Optional - tolerate missing ones (names drift across Pi OS releases):
 #   libglib2.0-0 is now libglib2.0-0t64 on Bookworm/Trixie (apt auto-selects)
@@ -55,13 +54,13 @@ fi
 if [[ -d "$INSTALL_DIR/.git" ]]; then
     echo "[install] repo exists, fetching latest..."
     sudo -u "$RUN_USER" git -C "$INSTALL_DIR" fetch --quiet origin
-    sudo -u "$RUN_USER" git -C "$INSTALL_DIR" checkout --quiet "$BRANCH"
-    sudo -u "$RUN_USER" git -C "$INSTALL_DIR" reset --quiet --hard "origin/$BRANCH"
+        sudo -u "$RUN_USER" git -C "$INSTALL_DIR" checkout --quiet "$BRANCH"
+    sudo -u "$RUN_user" git -C "$INSTALL_DIR" reset --quiet --hard "origin/$BRANCH"
 else
     echo "[install] cloning $REPO_URL into $INSTALL_DIR..."
     mkdir -p "$INSTALL_DIR"
-    chown "$RUN_USER:$RUN_USER" "$INSTALL_DIR"
-    sudo -u "$RUN_USER" git clone --quiet --branch "$BRANCH" "$REPO_URL" "$INSTALL_DIR"
+    chown "$RUN_user:$RUN_user" "$INSTALL_DIR"
+    sudo -u "$RUN_user" git clone --quiet --branch "$BRANCH" "$REPO_URL" "$INSTALL_DIR"
 fi
 
 chmod +x "$INSTALL_DIR/update.sh" "$INSTALL_DIR/install.sh"
@@ -76,13 +75,12 @@ Wants=network-online.target
 [Service]
 Type=simple
 User=$RUN_USER
+Group=$RUN_USER
 WorkingDirectory=$INSTALL_DIR
 ExecStart=/usr/bin/env bash $INSTALL_DIR/update.sh
 Restart=on-failure
 RestartSec=5
-# Allow access to framebuffer + X server if running under desktop
-Environment=DISPLAY=:0
-Environment=XAUTHORITY=/home/$RUN_USER/.Xauthority
+# Removed GUI environment variables to support headless operation
 
 [Install]
 WantedBy=multi-user.target
@@ -94,17 +92,17 @@ systemctl enable openscanner.service
 # Allow the scanner user to shut down + format USB drives without a password.
 SUDOERS=/etc/sudoers.d/openscanner
 cat > "$SUDOERS" <<EOF
-$RUN_USER ALL=(root) NOPASSWD: /sbin/shutdown, /usr/sbin/mkfs.vfat, /sbin/mkfs.vfat, /bin/umount, /usr/bin/eject
+$RUN_user ALL=(root) NOPASSWD: /sbin/shutdown, /usr/sbin/mkfs.vfat, /sbin/mkfs.vfat, /bin/umount, /usr/bin/eject
 EOF
 chmod 440 "$SUDOERS"
-echo "[install] sudoers: $RUN_USER may shutdown / mkfs.vfat / umount / eject without password"
+echo "[install] sudoers: $RUN_user may shutdown / mkfs.vfat / umount / eject without password"
 
 # Stop the desktop file-manager from popping up a window every time a USB
 # drive is plugged in - that popup steals focus from the scanner's
 # fullscreen window and makes it look frozen.
 # Profiles: LXDE-pi (Bookworm), LXDE (Bullseye), default (labwc/Wayland)
 for profile in LXDE-pi LXDE default; do
-    PCMANFM_DIR="/home/$RUN_USER/.config/pcmanfm/$profile"
+    PCMANFM_DIR="/home/$RUN_user/.config/pcmanfm/$profile"
     mkdir -p "$PCMANFM_DIR"
     cat > "$PCMANFM_DIR/pcmanfm.conf" <<EOF
 [config]
@@ -119,11 +117,11 @@ autorun=0
 always_show_tabs=0
 EOF
 done
-chown -R "$RUN_USER:$RUN_USER" "/home/$RUN_USER/.config/pcmanfm"
+chown -R "$RUN_user:$RUN_user" "/home/$RUN_user/.config/pcmanfm"
 echo "[install] pcmanfm: auto-mount popup disabled for LXDE-pi/LXDE/default profiles"
 
 # Block pcmanfm --desktop from autostarting (it's what shows the popup)
-AUTOSTART_DIR="/home/$RUN_USER/.config/autostart"
+AUTOSTART_DIR="/home/$RUN_user/.config/autostart"
 mkdir -p "$AUTOSTART_DIR"
 cat > "$AUTOSTART_DIR/pcmanfm.desktop" <<EOF
 [Desktop Entry]
@@ -133,7 +131,7 @@ Exec=true
 Hidden=true
 X-GNOME-Autostart-enabled=false
 EOF
-chown -R "$RUN_USER:$RUN_USER" "$AUTOSTART_DIR"
+chown -R "$RUN_user:$RUN_user" "$AUTOSTART_DIR"
 echo "[install] pcmanfm desktop autostart blocked via $AUTOSTART_DIR"
 
 echo
