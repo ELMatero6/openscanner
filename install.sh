@@ -117,21 +117,88 @@ EOF
 systemctl daemon-reload
 systemctl enable openscanner.service
 
-# Stop and mask getty@tty1 - it owns /dev/tty1 by default and would
-# repaint the login prompt on top of the scanner. Our service grabs
-# tty1 outright (TTYPath above), but masking getty makes the conflict
-# explicit and survives systemd-tty-ask-password-agent restarts.
-systemctl disable --now getty@tty1.service 2>/dev/null || true
-systemctl mask getty@tty1.service 2>/dev/null || true
-echo "[install] getty@tty1 masked - tty1 reserved for the scanner"
+# Reserve tty1 for the scanner. There are FOUR things that can paint
+# a login prompt on top of us, and we kill them all:
+#
+# 1. Plain getty@tty1.service (Pi OS Lite default)
+# 2. The raspi-config autologin override drop-in at
+#    /etc/systemd/system/getty@tty1.service.d/autologin.conf
+# 3. lightdm / gdm3 (Pi OS Desktop graphical login)
+# 4. The kernel console scrolling boot messages on tty1
+#
+# Use raspi-config's official "boot to console, no autologin" knob if
+# available; it cleans up the autologin drop-in for us.
+if command -v raspi-config >/dev/null 2>&1; then
+    raspi-config nonint do_boot_behaviour B1 2>/dev/null || true
+    echo "[install] raspi-config: boot to console, no autologin"
+fi
 
-# Allow the scanner user to shut down + format USB drives without a password.
+# Belt and braces: remove the autologin drop-in by hand if it's still there.
+rm -f /etc/systemd/system/getty@tty1.service.d/autologin.conf 2>/dev/null || true
+rmdir /etc/systemd/system/getty@tty1.service.d 2>/dev/null || true
+
+systemctl daemon-reload
+
+# Mask the login units so nothing can re-spawn them.
+for unit in getty@tty1.service lightdm.service gdm.service gdm3.service; do
+    if systemctl list-unit-files "$unit" >/dev/null 2>&1; then
+        systemctl disable --now "$unit" 2>/dev/null || true
+        systemctl mask "$unit" 2>/dev/null || true
+        echo "[install] masked $unit"
+    fi
+done
+
+# Move the kernel console off tty1 so boot messages and the cursor
+# don't bleed through. Edits /boot/firmware/cmdline.txt (Bookworm) or
+# /boot/cmdline.txt (older). Idempotent: only touches console=tty1.
+for CMDFILE in /boot/firmware/cmdline.txt /boot/cmdline.txt; do
+    [[ -f "$CMDFILE" ]] || continue
+    if grep -q 'console=tty1' "$CMDFILE"; then
+        sed -i 's/console=tty1/console=tty3/' "$CMDFILE"
+        echo "[install] $CMDFILE: moved kernel console tty1 -> tty3"
+    fi
+    # Hide the kernel cursor + boot logo on the active console
+    grep -q 'vt.global_cursor_default=0' "$CMDFILE" || \
+        sed -i 's/$/ vt.global_cursor_default=0/' "$CMDFILE"
+    grep -q 'logo.nologo' "$CMDFILE" || \
+        sed -i 's/$/ logo.nologo/' "$CMDFILE"
+    break
+done
+
+# Allow the scanner user to shut down + mount/format/eject USB drives
+# without a password. The mount fallback (in export.usb_mount) needs
+# this because udisksctl usually fails when run from a systemd service
+# without an active login session.
 SUDOERS=/etc/sudoers.d/openscanner
 cat > "$SUDOERS" <<EOF
-$RUN_USER ALL=(root) NOPASSWD: /sbin/shutdown, /usr/sbin/mkfs.vfat, /sbin/mkfs.vfat, /bin/umount, /usr/bin/eject
+$RUN_USER ALL=(root) NOPASSWD: /sbin/shutdown, /usr/sbin/mkfs.vfat, /sbin/mkfs.vfat, /bin/mount, /usr/bin/mount, /bin/umount, /usr/bin/umount, /usr/bin/eject, /usr/sbin/partprobe, /sbin/partprobe
 EOF
 chmod 440 "$SUDOERS"
-echo "[install] sudoers: $RUN_USER may shutdown / mkfs.vfat / umount / eject without password"
+echo "[install] sudoers: $RUN_USER may mount / umount / mkfs.vfat / partprobe / eject / shutdown without password"
+
+# Polkit rule: let $RUN_USER mount/unmount removable drives via udisksctl
+# even without an active login session. That's the clean path - it puts
+# the mount under /media/$RUN_USER/<label> the way a desktop would, and
+# udisks handles the partition dance for us. If this rule is in place
+# the sudo fallback above is never used, but we keep it as a backstop.
+POLKIT_RULE=/etc/polkit-1/rules.d/50-openscanner-udisks.rules
+mkdir -p /etc/polkit-1/rules.d
+cat > "$POLKIT_RULE" <<EOF
+polkit.addRule(function(action, subject) {
+    if ((action.id == "org.freedesktop.udisks2.filesystem-mount" ||
+         action.id == "org.freedesktop.udisks2.filesystem-mount-system" ||
+         action.id == "org.freedesktop.udisks2.filesystem-unmount-others" ||
+         action.id == "org.freedesktop.udisks2.power-off-drive" ||
+         action.id == "org.freedesktop.udisks2.eject-media") &&
+        subject.user == "$RUN_USER") {
+        return polkit.Result.YES;
+    }
+});
+EOF
+chmod 644 "$POLKIT_RULE"
+# Reload polkit so the rule takes effect without a reboot
+systemctl reload polkit 2>/dev/null || systemctl restart polkit 2>/dev/null || true
+echo "[install] polkit: $RUN_USER may udisksctl mount/unmount/eject without a session"
 
 # Block USB auto-mount popups at the udev level. Our export.py mounts the
 # drive explicitly via udisksctl, so we don't need any session helper to do
