@@ -28,7 +28,7 @@ else
             echo "[update] up to date on $BRANCH @ $(git rev-parse --short HEAD)"
         else
             echo "[update] pull failed - running cached version"
-        fi
+                    fi
     else
         echo "[update] fetch failed (offline?) - running cached version"
     fi
@@ -43,4 +43,12 @@ for prog in pcmanfm pcmanfm-desktop nautilus nemo thunar; do
 done
 
 echo "[update] launching pi_scanner.py..."
-exec "$PYTHON" pi_scanner.py
+# HEURISTIC CHECK FOR HEADLESS MODE:
+# If DISPLAY/XAUTHORITY are unset, we assume headless and run detached.
+if [[ -z "${DISPLAY:-}" ]] && [[ -z "${XAUTHORITY:-}" ]]; then
+    echo "[update] Detected headless environment. Running pi_scanner.py in background."
+    exec "$PYTHON" pi_scanner.py &
+else
+    # Otherwise, assume GUI and run normally (relying on the systemd type=simple setup)
+    exec "$PYTHON" pi_scanner.py
+fi
