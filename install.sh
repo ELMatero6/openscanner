@@ -102,16 +102,39 @@ echo "[install] sudoers: $RUN_USER may shutdown / mkfs.vfat / umount / eject wit
 # Stop the desktop file-manager from popping up a window every time a USB
 # drive is plugged in - that popup steals focus from the scanner's
 # fullscreen window and makes it look frozen.
-PCMANFM_DIR="/home/$RUN_USER/.config/pcmanfm/LXDE-pi"
-mkdir -p "$PCMANFM_DIR"
-cat > "$PCMANFM_DIR/pcmanfm.conf" <<EOF
+# Profiles: LXDE-pi (Bookworm), LXDE (Bullseye), default (labwc/Wayland)
+for profile in LXDE-pi LXDE default; do
+    PCMANFM_DIR="/home/$RUN_USER/.config/pcmanfm/$profile"
+    mkdir -p "$PCMANFM_DIR"
+    cat > "$PCMANFM_DIR/pcmanfm.conf" <<EOF
+[config]
+bm_open_method=0
+
 [volume]
 mount_on_startup=0
 mount_removable=0
 autorun=0
+
+[ui]
+always_show_tabs=0
 EOF
+done
 chown -R "$RUN_USER:$RUN_USER" "/home/$RUN_USER/.config/pcmanfm"
-echo "[install] pcmanfm: auto-mount popup disabled"
+echo "[install] pcmanfm: auto-mount popup disabled for LXDE-pi/LXDE/default profiles"
+
+# Block pcmanfm --desktop from autostarting (it's what shows the popup)
+AUTOSTART_DIR="/home/$RUN_USER/.config/autostart"
+mkdir -p "$AUTOSTART_DIR"
+cat > "$AUTOSTART_DIR/pcmanfm.desktop" <<EOF
+[Desktop Entry]
+Type=Application
+Name=pcmanfm (disabled)
+Exec=true
+Hidden=true
+X-GNOME-Autostart-enabled=false
+EOF
+chown -R "$RUN_USER:$RUN_USER" "$AUTOSTART_DIR"
+echo "[install] pcmanfm desktop autostart blocked via $AUTOSTART_DIR"
 
 echo
 echo "[install] done!"

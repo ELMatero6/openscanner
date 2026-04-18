@@ -34,5 +34,13 @@ else
     fi
 fi
 
+echo "[update] killing any file manager windows that could steal focus..."
+# pcmanfm / nautilus / nemo pop up on USB insert and cover our fullscreen
+# window, which makes the scanner look frozen. Best-effort cleanup here;
+# we re-kill them whenever a popup slips through via xdotool during run.
+for prog in pcmanfm pcmanfm-desktop nautilus nemo thunar; do
+    pkill -f "$prog" 2>/dev/null || true
+done
+
 echo "[update] launching pi_scanner.py..."
 exec "$PYTHON" pi_scanner.py

@@ -58,6 +58,87 @@ def _open_camera():
     return None
 
 
+class CameraReader:
+    """Reads frames off a cv2.VideoCapture on a dedicated thread.
+
+    cv2.VideoCapture.read() can block for hundreds of milliseconds when
+    the USB bus is contended (e.g. during a USB write). Keeping reads off
+    the main thread means the UI keeps rendering at full rate even when
+    the camera stalls. We always expose the latest frame; stale frames
+    are fine because the UI handles "no fresh frame" gracefully.
+    """
+
+    def __init__(self, cap):
+        self.cap = cap
+        self._lock = threading.Lock()
+        self._frame = None
+        self._ts = 0.0
+        self._ok = 0
+        self._fail = 0
+        self._stop = False
+        self._t = threading.Thread(target=self._loop, daemon=True)
+        self._t.start()
+
+    def _loop(self):
+        while not self._stop:
+            try:
+                ret, frame = self.cap.read()
+            except Exception:
+                ret = False
+                frame = None
+            if ret and frame is not None:
+                with self._lock:
+                    self._frame = frame
+                    self._ts = time.time()
+                    self._ok += 1
+            else:
+                self._fail += 1
+                time.sleep(0.02)
+
+    def read(self, max_age=0.5):
+        """Return (frame, age_s). frame=None if no fresh frame available."""
+        with self._lock:
+            f = self._frame
+            ts = self._ts
+        if f is None:
+            return None, float("inf")
+        age = time.time() - ts
+        return (f if age <= max_age else None), age
+
+    def stats(self):
+        return self._ok, self._fail
+
+    def stop(self):
+        self._stop = True
+        try:
+            self._t.join(timeout=1.0)
+        except Exception:
+            pass
+
+
+def _bg_mask_from_rf(rf_disp, bg_thresh, out_shape):
+    """Build a foreground mask from the cheap live disparity.
+
+    The mask is generated once in left-eye coordinates at rf_disp's
+    160x120 resolution, dilated horizontally to cover the right eye's
+    view of the same object (parallax), then nearest-upscaled to the
+    full frame size. We apply the SAME mask to both eyes before any
+    further stereo work so SGBM only sees foreground pixels.
+
+    out_shape is (H, W) of the full frame.
+    """
+    mask_lo = (rf_disp >= bg_thresh * 0.85).astype(np.uint8)
+    # Horizontal dilation ~ max live-disparity so the right eye's
+    # shifted view of the object still falls inside the mask. 31 at
+    # 160 wide is about 20% - plenty for typical indoor subjects.
+    kern = cv2.getStructuringElement(cv2.MORPH_RECT, (31, 7))
+    mask_lo = cv2.morphologyEx(mask_lo, cv2.MORPH_CLOSE, kern)
+    mask_lo = cv2.morphologyEx(mask_lo, cv2.MORPH_OPEN,
+                               cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3)))
+    h, w = out_shape
+    return cv2.resize(mask_lo, (w, h), interpolation=cv2.INTER_NEAREST)
+
+
 def _ply_paths():
     """Sorted list of per-capture PLYs in SAVE_DIR (excludes fused.ply)."""
     return sorted(
@@ -232,6 +313,8 @@ def run():
     actual_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     log.info("camera open: %dx%d", actual_w, actual_h)
 
+    cam = CameraReader(cap)
+
     cal = load_calibration(CALIBRATION_FILE, (actual_w // 2, actual_h))
 
     dist_mode = settings["dist_mode"] if settings["dist_mode"] in DIST_PRESETS else "MED"
@@ -292,23 +375,21 @@ def run():
     left = right = None
     left_panel = make_empty_right_panel("Camera starting...", "")
     rf_disp = np.zeros((120, 160), dtype=np.float32)
-    cam_fail_count = 0
+    heartbeat_t = time.time()
+    heartbeat_frames = 0
 
     while True:
-        ret, frame = cap.read()
+        frame, frame_age = cam.read(max_age=0.5)
         now = time.time()
+        ret = frame is not None
 
         if ret:
-            cam_fail_count = 0
             mid   = frame.shape[1] // 2
             left  = frame[:, :mid]
             right = frame[:, mid:]
 
             if state["cal"]:
                 left, right = rectify(left, right, state["cal"])
-
-            # Viewfinder = rectified left eye, letterboxed
-            left_panel = fit_to_panel(left)
 
             # Live rangefinder + BG mask source - cheap matcher at 160x120
             RF_W, RF_H = 160, 120
@@ -331,20 +412,29 @@ def run():
             else:
                 state["crosshair_dist_m"] = None
 
-            # Live BG removal: mask the viewfinder using rf_disp upscaled
+            # Pre-depth BG removal: mask BOTH full-res eyes from the cheap
+            # rf_disp. This way SGBM at capture time only sees foreground
+            # pixels (cleaner disparity, less background bleed) and the
+            # live viewfinder reflects exactly what will be saved.
             if state["bg_thresh"] is not None:
-                disp_up = cv2.resize(rf_disp, (PANEL_W, VF_H))
-                mask = (disp_up >= state["bg_thresh"] * 0.85).astype(np.uint8)
-                kern = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
-                mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kern)
-                left_panel = (left_panel * mask[:, :, None]).astype(np.uint8)
-        else:
-            # Camera read failed - common during heavy USB writes sharing the bus.
-            # Keep UI/state/touches alive with the last good viewfinder so we don't
-            # freeze on an overlay and miss async completion dialogs.
-            cam_fail_count += 1
-            if cam_fail_count in (10, 100, 500):
-                log.warning("camera read returning no frame (count=%d)", cam_fail_count)
+                mask = _bg_mask_from_rf(
+                    rf_disp, state["bg_thresh"], (left.shape[0], left.shape[1])
+                )
+                left  = left  * mask[:, :, None]
+                right = right * mask[:, :, None]
+
+            # Viewfinder = rectified (and possibly BG-masked) left eye
+            left_panel = fit_to_panel(left)
+
+        # Heartbeat every ~5s so we can spot stalls / drop in framerate
+        heartbeat_frames += 1
+        if now - heartbeat_t >= 5.0:
+            fps = heartbeat_frames / (now - heartbeat_t)
+            ok, fail = cam.stats()
+            log.info("heartbeat: fps=%.1f cam_age=%.2fs cam_ok=%d cam_fail=%d",
+                     fps, frame_age, ok, fail)
+            heartbeat_t = now
+            heartbeat_frames = 0
 
         # GPIO
         gpio_now = _gpio_low()
@@ -482,20 +572,9 @@ def run():
                         (8, 20), FONT, 0.45, (255, 255, 255), 1)
             state["has_disp"] = True
 
-            # Apply BG mask consistently (sample + apply at same disp scale)
+            # left/right are already BG-masked upstream via _bg_mask_from_rf,
+            # so disp was computed on masked inputs - nothing more to do here.
             save_left, save_right, save_disp = left, right, disp
-            if state["bg_thresh"] is not None:
-                # Resample the BG threshold from the high-res disp to match scale
-                hi_thresh = sample_disp_at(disp, 0.5, 0.5, 0.08)
-                if hi_thresh and hi_thresh > 0:
-                    mask = (disp >= hi_thresh * 0.85).astype(np.uint8)
-                    kern = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9))
-                    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kern)
-                    mask_full = cv2.resize(mask, (left.shape[1], left.shape[0]),
-                                           interpolation=cv2.INTER_NEAREST)
-                    save_left  = (left  * mask_full[:, :, None]).astype(np.uint8)
-                    save_right = (right * mask_full[:, :, None]).astype(np.uint8)
-                    save_disp  = disp * mask
 
             idx = state["captures"] + 1
             meta = save_capture(SAVE_DIR, idx, save_left, save_right, save_disp,
@@ -517,6 +596,7 @@ def run():
         if key in (ord("q"), 27):
             break
 
+    cam.stop()
     cap.release()
     cv2.destroyAllWindows()
     if GPIO_OK:
