@@ -2,16 +2,31 @@
 Description=openscanner stereo 3D scanner
 After=multi-user.target
 Wants=network-online.target
+# tty1 is shared with the login prompt; we own it exclusively while running.
+Conflicts=getty@tty1.service
+After=getty@tty1.service
 
 [Service]
 Type=simple
-User=pi
+User=scanner
 WorkingDirectory=/opt/openscanner
 ExecStart=/usr/bin/env bash /opt/openscanner/update.sh
 Restart=on-failure
 RestartSec=5
-Environment=DISPLAY=:0
-Environment=XAUTHORITY=/home/pi/.Xauthority
+# pygame + SDL2: draw straight to KMS, no X/Wayland needed
+Environment=SDL_VIDEODRIVER=kmsdrm
+Environment=SDL_FBDEV=/dev/fb0
+Environment=PYGAME_HIDE_SUPPORT_PROMPT=1
+# Own tty1 outright so the kernel console / login prompt can't fight us
+# for the framebuffer. tty-force makes systemd ours even if something
+# else is holding it.
+TTYPath=/dev/tty1
+TTYReset=yes
+TTYVHangup=yes
+TTYVTDisallocate=yes
+StandardInput=tty-force
+StandardOutput=journal
+StandardError=journal
 
 [Install]
 WantedBy=multi-user.target

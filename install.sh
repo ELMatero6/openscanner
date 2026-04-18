@@ -19,7 +19,7 @@ REPO_URL="${OPENSCANNER_REPO:-https://github.com/elmatero6/openscanner.git}"
 BRANCH="${OPENSCANNER_BRANCH:-main}"
 INSTALL_DIR="/opt/openscanner"
 SERVICE="/etc/systemd/system/openscanner.service"
-RUN_USER="${SUDO_USER:-pi}"
+RUN_USER="${SUDO_USER:-scanner}"
 
 if [[ $EUID -ne 0 ]]; then
     echo "[install] must be run as root (sudo)"
