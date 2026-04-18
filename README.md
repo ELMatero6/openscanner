@@ -5,7 +5,7 @@ A stereo 3D scanner for Raspberry Pi 4 + Waveshare 5" 800x480 touchscreen.
 ## Features
 
 - Stereo SGBM with optional WLS smoothing
-- Touch UI: CLOSE/MED/FAR presets, BG removal, rangefinder, coverage map
+- Touch UI: INTERIOR / SMALL / LARGE scene presets, BG removal, rangefinder, coverage map
 - Per-capture export: rectified L/R PNGs, colour + 16-bit raw disparity, PLY point cloud
 - On-device 3D point cloud viewer (drag to rotate, zoom)
 - USB export without formatting the drive
@@ -77,7 +77,7 @@ All metadata goes into `captures.csv` (single consistent schema).
 
 ```json
 {
-  "dist_mode": "MED",
+  "dist_mode": "SMALL",
   "bg_on": false,
   "auto_update": true,
   "screen_rotate": 0,

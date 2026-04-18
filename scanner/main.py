@@ -120,19 +120,32 @@ class CameraReader:
 def _bg_mask_from_rf(rf_disp, bg_thresh, out_shape):
     """Build a foreground mask from the cheap live disparity.
 
-    The mask is generated once in left-eye coordinates at rf_disp's
-    160x120 resolution, dilated horizontally to cover the right eye's
-    view of the same object (parallax), then nearest-upscaled to the
-    full frame size. We apply the SAME mask to both eyes before any
-    further stereo work so SGBM only sees foreground pixels.
+    Covers the full viewfinder width, including the SGBM "invalid"
+    stripe on the left edge: SGBM leaves the leftmost ~num_disp columns
+    with disp=-1, so a naive threshold would chop off anything in that
+    strip. We propagate the first valid column's mask leftward to fill
+    it, so the mask follows the subject rather than the matcher's
+    blind spot.
 
-    out_shape is (H, W) of the full frame.
+    The mask is then horizontally dilated to cover the right eye's
+    parallax-shifted view of the same object, and nearest-upscaled
+    to the full frame so we can apply it to both eyes before SGBM.
     """
     mask_lo = (rf_disp >= bg_thresh * 0.85).astype(np.uint8)
+
+    # Fill the SGBM-invalid left stripe (disp<0) by copying the first
+    # valid column across it. This is what stops the "one side cut off"
+    # artifact - the subject is preserved to the left edge of the frame.
+    valid_col = (rf_disp >= 0).any(axis=0)
+    if valid_col.any():
+        first = int(np.argmax(valid_col))
+        if first > 0:
+            mask_lo[:, :first] = mask_lo[:, first:first + 1]
+
     # Horizontal dilation ~ max live-disparity so the right eye's
-    # shifted view of the object still falls inside the mask. 31 at
-    # 160 wide is about 20% - plenty for typical indoor subjects.
-    kern = cv2.getStructuringElement(cv2.MORPH_RECT, (31, 7))
+    # shifted view of the object still falls inside the mask. 41 at
+    # 160 wide is about 25% - covers tight close-up subjects too.
+    kern = cv2.getStructuringElement(cv2.MORPH_RECT, (41, 7))
     mask_lo = cv2.morphologyEx(mask_lo, cv2.MORPH_CLOSE, kern)
     mask_lo = cv2.morphologyEx(mask_lo, cv2.MORPH_OPEN,
                                cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3)))
@@ -299,7 +312,7 @@ def run():
 
     cal = load_calibration(CALIBRATION_FILE, (actual_w // 2, actual_h))
 
-    dist_mode = settings["dist_mode"] if settings["dist_mode"] in DIST_PRESETS else "MED"
+    dist_mode = settings["dist_mode"] if settings["dist_mode"] in DIST_PRESETS else DIST_ORDER[0]
     matcher   = build_matcher(**{k: DIST_PRESETS[dist_mode][k] for k in ("num_disp", "block")})
     live_m    = build_live_matcher()
     csv_path  = init_csv(SAVE_DIR)

@@ -47,11 +47,17 @@ def append_csv(csv_path, row):
         csv.writer(f).writerow([row.get(k, "") for k in CSV_HEADERS])
 
 
-def disparity_to_points(disp, Q, colour_img, max_distance_m=5.0):
-    """Reproject disparity to 3D points. Returns (Nx3 xyz_m, Nx3 rgb_uint8)."""
+def disparity_to_points(disp, Q, colour_img, min_distance_m=0.1, max_distance_m=5.0):
+    """Reproject disparity to 3D points. Returns (Nx3 xyz_m, Nx3 rgb_uint8).
+
+    min_distance_m / max_distance_m come from the active scene preset so
+    e.g. SMALL mode doesn't stain the cloud with far-field noise from the
+    room behind the subject.
+    """
     pts3d = cv2.reprojectImageTo3D(disp, Q)
     mask = (disp > 0) & np.isfinite(pts3d[:, :, 2]) & (pts3d[:, :, 2] > 0)
     mask &= pts3d[:, :, 2] < max_distance_m
+    mask &= pts3d[:, :, 2] > min_distance_m
     xyz = pts3d[mask]
     if colour_img.shape[:2] != disp.shape[:2]:
         colour_img = cv2.resize(colour_img, (disp.shape[1], disp.shape[0]))
@@ -100,8 +106,11 @@ def save_capture(save_dir, idx, left, right, disp, cal, state, csv_path):
     cv2.imwrite(os.path.join(save_dir, fnames["R"]), right)
 
     # Coloured heatmap (display)
-    from .config import DIST_PRESETS
-    num_disp = DIST_PRESETS[state.get("dist_mode", "MED")]["num_disp"]
+    from .config import DIST_ORDER, DIST_PRESETS
+    dist_mode = state.get("dist_mode")
+    if dist_mode not in DIST_PRESETS:
+        dist_mode = DIST_ORDER[0]
+    num_disp = DIST_PRESETS[dist_mode]["num_disp"]
     clipped  = np.clip(disp, 0, num_disp)
     norm     = (clipped / num_disp * 255).astype(np.uint8)
     coloured = cv2.applyColorMap(norm, cv2.COLORMAP_TURBO)
@@ -128,7 +137,12 @@ def save_capture(save_dir, idx, left, right, disp, cal, state, csv_path):
         Q_scaled[3, 2] *= s
         # Use rectified left at matching scale for colour
         left_small = cv2.resize(left, (disp.shape[1], disp.shape[0]))
-        xyz, rgb = disparity_to_points(disp, Q_scaled, left_small)
+        preset = DIST_PRESETS[dist_mode]
+        xyz, rgb = disparity_to_points(
+            disp, Q_scaled, left_small,
+            min_distance_m=preset["min_depth"],
+            max_distance_m=preset["max_depth"],
+        )
         ply_path = os.path.join(save_dir, fnames["PLY"])
         ply_written = write_ply(ply_path, xyz, rgb)
 
@@ -141,7 +155,7 @@ def save_capture(save_dir, idx, left, right, disp, cal, state, csv_path):
     coverage   = round(valid_px / total_px * 100, 2)
     mean_disp  = round(float(disp[valid_mask].mean()) if valid_px > 0 else 0.0, 3)
 
-    p        = DIST_PRESETS[state.get("dist_mode", "MED")]
+    p        = DIST_PRESETS[dist_mode]
     baseline = cal["baseline_mm"] if cal else state.get("baseline_mm", 60.0)
     focal    = cal["focal_px"]    if cal else 0.0
 
@@ -156,7 +170,7 @@ def save_capture(save_dir, idx, left, right, disp, cal, state, csv_path):
         "img_w":         left.shape[1],
         "img_h":         left.shape[0],
         "rectified":     1 if cal else 0,
-        "dist_mode":     state.get("dist_mode", "MED"),
+        "dist_mode":     dist_mode,
         "num_disp":      p["num_disp"],
         "block_size":    p["block"],
         "wls":           1 if XIMGPROC else 0,

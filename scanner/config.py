@@ -38,12 +38,22 @@ NAV_CAL_X, NAV_CAL_W = 640, 160
 DEFAULT_BASELINE_MM = 60.0
 DISP_SCALE = 0.5
 
+# Scene-aware capture presets. Each tunes SGBM for the typical depth
+# range of that scene AND clips the exported point cloud so you don't
+# get a wedge of useless far-field garbage behind the subject.
+#   num_disp   bigger = can see closer things, slower capture
+#   block      smaller = finer detail, noisier; bigger = smoother, less detail
+#   max_depth  hard clip on the exported PLY (metres)
+#   min_depth  hard clip on the near side (metres)
 DIST_PRESETS = {
-    "CLOSE": {"num_disp": 160, "block": 3, "label": "CLOSE 20-60cm"},
-    "MED":   {"num_disp": 128, "block": 5, "label": "MED 50-150cm"},
-    "FAR":   {"num_disp": 64,  "block": 7, "label": "FAR  1-5m"},
+    "INTERIOR": {"num_disp": 128, "block": 7, "label": "INTERIOR 0.5-5m",
+                 "min_depth": 0.4, "max_depth": 5.0},
+    "SMALL":    {"num_disp": 192, "block": 3, "label": "SMALL 0.2-1m",
+                 "min_depth": 0.15, "max_depth": 1.0},
+    "LARGE":    {"num_disp": 112, "block": 5, "label": "LARGE 0.5-3.5m",
+                 "min_depth": 0.4, "max_depth": 3.5},
 }
-DIST_ORDER = ["CLOSE", "MED", "FAR"]
+DIST_ORDER = ["INTERIOR", "SMALL", "LARGE"]
 
 FONT      = cv2.FONT_HERSHEY_SIMPLEX
 MONO_FONT = cv2.FONT_HERSHEY_PLAIN       # narrower, terminal-ish
