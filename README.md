@@ -70,7 +70,7 @@ All metadata goes into `captures.csv` (single consistent schema).
 
 - all `N_*` files and `captures.csv`
 - `stereo_calibration.npz` (intrinsics, extrinsics, Q matrix)
-- `fused.ply` (concatenation of per-capture PLYs, no pose registration)
+- `concat.ply` (concatenation of per-capture PLYs, no pose registration)
 - `README.txt` (build version, baseline, focal, file format notes)
 
 ## Settings (`.settings` JSON)

@@ -140,10 +140,10 @@ def _bg_mask_from_rf(rf_disp, bg_thresh, out_shape):
 
 
 def _ply_paths():
-    """Sorted list of per-capture PLYs in SAVE_DIR (excludes fused.ply)."""
+    """Sorted list of per-capture PLYs in SAVE_DIR (excludes concat.ply)."""
     return sorted(
         os.path.join(SAVE_DIR, f) for f in os.listdir(SAVE_DIR)
-        if f.endswith(".ply") and not f.startswith("fused")
+        if f.endswith(".ply") and not f.startswith(("fused", "concat"))
     )
 
 

@@ -249,7 +249,7 @@ def write_readme(path, n_captures, cal, version):
         "",
         "captures.csv  per-capture metadata + processing parameters",
         "stereo_calibration.npz  intrinsics + extrinsics + Q matrix",
-        "fused.ply     concatenation of all PLYs (no pose registration)",
+        "concat.ply    concatenation of all PLYs (no pose registration)",
         "",
         "To recover float disparity:  disp = imread(N_D_raw.png, IMREAD_UNCHANGED).astype(float32) / 16",
         "To recover 3D from disparity: xyz = reprojectImageTo3D(disp, Q)  (Q in npz)",
@@ -259,8 +259,8 @@ def write_readme(path, n_captures, cal, version):
 
 
 def zip_export(save_dir, out_path, cal, version, progress_cb=None):
-    """Zip scans dir + calibration.npz + fused.ply + README into one archive."""
-    fused = os.path.join(save_dir, "fused.ply")
+    """Zip scans dir + calibration.npz + concat.ply + README into one archive."""
+    fused = os.path.join(save_dir, "concat.ply")
     fuse_plys(save_dir, fused)
 
     readme = os.path.join(save_dir, "README.txt")
