@@ -84,6 +84,9 @@ cat > "$SERVICE" <<EOF
 Description=openscanner stereo 3D scanner
 After=multi-user.target
 Wants=network-online.target
+# tty1 is shared with the login prompt; we own it exclusively while running.
+Conflicts=getty@tty1.service
+After=getty@tty1.service
 
 [Service]
 Type=simple
@@ -96,9 +99,14 @@ RestartSec=5
 Environment=SDL_VIDEODRIVER=kmsdrm
 Environment=SDL_FBDEV=/dev/fb0
 Environment=PYGAME_HIDE_SUPPORT_PROMPT=1
-# Needed so KMSDRM can grab the active TTY
+# Own tty1 outright so the kernel console / login prompt can't fight us
+# for the framebuffer. tty-force makes systemd ours even if something
+# else is holding it.
 TTYPath=/dev/tty1
-StandardInput=tty
+TTYReset=yes
+TTYVHangup=yes
+TTYVTDisallocate=yes
+StandardInput=tty-force
 StandardOutput=journal
 StandardError=journal
 
@@ -108,6 +116,14 @@ EOF
 
 systemctl daemon-reload
 systemctl enable openscanner.service
+
+# Stop and mask getty@tty1 - it owns /dev/tty1 by default and would
+# repaint the login prompt on top of the scanner. Our service grabs
+# tty1 outright (TTYPath above), but masking getty makes the conflict
+# explicit and survives systemd-tty-ask-password-agent restarts.
+systemctl disable --now getty@tty1.service 2>/dev/null || true
+systemctl mask getty@tty1.service 2>/dev/null || true
+echo "[install] getty@tty1 masked - tty1 reserved for the scanner"
 
 # Allow the scanner user to shut down + format USB drives without a password.
 SUDOERS=/etc/sudoers.d/openscanner
