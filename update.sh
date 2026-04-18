@@ -28,27 +28,17 @@ else
             echo "[update] up to date on $BRANCH @ $(git rev-parse --short HEAD)"
         else
             echo "[update] pull failed - running cached version"
-                    fi
+        fi
     else
         echo "[update] fetch failed (offline?) - running cached version"
     fi
 fi
 
-echo "[update] killing any file manager windows that could steal focus..."
-# pcmanfm / nautilus / nemo pop up on USB insert and cover our fullscreen
-# window, which makes the scanner look frozen. Best-effort cleanup here;
-# we re-kill them whenever a popup slips through via xdotool during run.
-for prog in pcmanfm pcmanfm-desktop nautilus nemo thunar; do
-    pkill -f "$prog" 2>/dev/null || true
-done
+# Default to KMSDRM if nothing else is set. systemd unit also exports these,
+# but having them here lets `bash update.sh` work standalone for testing.
+export SDL_VIDEODRIVER="${SDL_VIDEODRIVER:-kmsdrm}"
+export SDL_FBDEV="${SDL_FBDEV:-/dev/fb0}"
+export PYGAME_HIDE_SUPPORT_PROMPT=1
 
-echo "[update] launching pi_scanner.py..."
-# HEURISTIC CHECK FOR HEADLESS MODE:
-# If DISPLAY/XAUTHORITY are unset, we assume headless and run detached.
-if [[ -z "${DISPLAY:-}" ]] && [[ -z "${XAUTHORITY:-}" ]]; then
-    echo "[update] Detected headless environment. Running pi_scanner.py in background."
-    exec "$PYTHON" pi_scanner.py &
-else
-    # Otherwise, assume GUI and run normally (relying on the systemd type=simple setup)
-    exec "$PYTHON" pi_scanner.py
-fi
+echo "[update] launching pi_scanner.py (SDL_VIDEODRIVER=$SDL_VIDEODRIVER)..."
+exec "$PYTHON" pi_scanner.py

@@ -13,6 +13,7 @@ import time
 import cv2
 import numpy as np
 
+from . import display
 from .config import (
     BTN_H, BTN_Y, C, FONT, SCREEN_H, SCREEN_W, PREVIEW_H,
 )
@@ -63,13 +64,13 @@ def _render(xyz, rgb, yaw, pitch, scale, w, h):
     return canvas
 
 
-def show(win, ply_paths, max_points=60000):
+def show(ply_paths, max_points=60000):
     """Display interactive point-cloud viewer. Returns when user taps BACK.
 
     ply_paths: list of paths to merge and view (e.g. all per-capture PLYs).
     """
     if not ply_paths:
-        _splash(win, "No point clouds to view", "Capture some shots first.")
+        _splash("No point clouds to view", "Capture some shots first.")
         return
 
     # Load + merge
@@ -81,7 +82,7 @@ def show(win, ply_paths, max_points=60000):
         except Exception as e:
             print(f"[VIEW] skip {p}: {e}")
     if not all_xyz:
-        _splash(win, "All point clouds failed to load")
+        _splash("All point clouds failed to load")
         return
 
     xyz = np.concatenate(all_xyz).astype(np.float32)
@@ -102,28 +103,23 @@ def show(win, ply_paths, max_points=60000):
 
     state = {
         "yaw": 0.0, "pitch": 0.0, "scale": base_scale,
-        "drag": False, "last": (0, 0),
-        "action": None,
+        "action": None, "quit": False,
     }
 
-    def on_event(event, x, y, flags, param):
-        if event == cv2.EVENT_LBUTTONDOWN:
-            if y > BTN_Y:
-                bw = SCREEN_W // 4
-                state["action"] = ["zoom_in", "zoom_out", "reset", "back"][min(x // bw, 3)]
-            else:
-                state["drag"] = True
-                state["last"] = (x, y)
-        elif event == cv2.EVENT_LBUTTONUP:
-            state["drag"] = False
-        elif event == cv2.EVENT_MOUSEMOVE and state["drag"]:
-            lx, ly = state["last"]
-            state["yaw"]   += (x - lx) * 0.01
-            state["pitch"] += (y - ly) * 0.01
-            state["pitch"]  = max(-1.5, min(1.5, state["pitch"]))
-            state["last"]   = (x, y)
-
-    cv2.setMouseCallback(win, on_event)
+    def _drain_input():
+        for ev in display.events():
+            if isinstance(ev, display.Tap):
+                if ev.y > BTN_Y:
+                    bw = SCREEN_W // 4
+                    state["action"] = ["zoom_in", "zoom_out", "reset", "back"][min(ev.x // bw, 3)]
+            elif isinstance(ev, display.Drag) and ev.y < BTN_Y:
+                state["yaw"]   += ev.dx * 0.01
+                state["pitch"] += ev.dy * 0.01
+                state["pitch"]  = max(-1.5, min(1.5, state["pitch"]))
+            elif isinstance(ev, display.Quit):
+                state["quit"] = True
+            elif isinstance(ev, display.Key) and ev.char in ("q", "\x1b"):
+                state["quit"] = True
 
     canvas = np.zeros((SCREEN_H, SCREEN_W, 3), dtype=np.uint8)
 
@@ -159,8 +155,9 @@ def show(win, ply_paths, max_points=60000):
                         (bx + (bw - tw) // 2, BTN_Y + (BTN_H + th) // 2),
                         FONT, 0.7, C["white"], 2)
 
-        cv2.imshow(win, canvas)
-        key = cv2.waitKey(30) & 0xFF
+        display.show(canvas)
+        _drain_input()
+        time.sleep(0.03)
 
         action = state["action"]; state["action"] = None
         if action == "zoom_in":
@@ -170,11 +167,11 @@ def show(win, ply_paths, max_points=60000):
         elif action == "reset":
             state["yaw"] = state["pitch"] = 0.0
             state["scale"] = base_scale
-        elif action == "back" or key in (ord("q"), 27):
+        elif action == "back" or state["quit"]:
             return
 
 
-def _splash(win, line1, line2=""):
+def _splash(line1, line2=""):
     """Brief modal message when there's nothing to view."""
     end = time.time() + 1.6
     while time.time() < end:
@@ -186,5 +183,6 @@ def _splash(win, line1, line2=""):
         if line2:
             (tw2, _), _ = cv2.getTextSize(line2, FONT, 0.5, 1)
             cv2.putText(ov, line2, ((SCREEN_W - tw2) // 2, 270), FONT, 0.5, C["grey"], 1)
-        cv2.imshow(win, ov)
-        cv2.waitKey(50)
+        display.show(ov)
+        display.events()
+        time.sleep(0.05)

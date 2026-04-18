@@ -7,6 +7,7 @@ import threading
 import cv2
 import numpy as np
 
+from . import display
 from . import logger as log_mod
 from .config import (
     BTN_H, BTN_Y, C, FONT, GPIO_PIN, PANEL_W, PREVIEW_H, SCREEN_H, SCREEN_W,
@@ -77,7 +78,7 @@ def save_calibration(path, mtxL, distL, mtxR, distR, R, T, R1, R2, P1, P2, Q,
     )
 
 
-def run_wizard(cap, actual_w, actual_h, win, cal_path, gpio_ok, gpio_in):
+def run_wizard(cap, actual_w, actual_h, cal_path, gpio_ok, gpio_in):
     """Touchscreen calibration wizard. Returns loaded calibration dict or None."""
     CHESS    = (9, 6)
     SQ_M     = 0.025
@@ -100,16 +101,16 @@ def run_wizard(cap, actual_w, actual_h, win, cal_path, gpio_ok, gpio_in):
     touch    = {"action": None}
     gpio_was = False
 
-    def on_touch(event, x, y, flags, param):
-        if event != cv2.EVENT_LBUTTONDOWN:
-            return
-        if y > BTN_Y:
-            bw = SCREEN_W // 3
-            param["action"] = ["save", "calibrate", "cancel"][min(x // bw, 2)]
-        else:
-            param["action"] = "save"
-
-    cv2.setMouseCallback(win, on_touch, touch)
+    def _drain_input():
+        for ev in display.events():
+            if isinstance(ev, display.Tap):
+                if ev.y > BTN_Y:
+                    bw = SCREEN_W // 3
+                    touch["action"] = ["save", "calibrate", "cancel"][min(ev.x // bw, 2)]
+                else:
+                    touch["action"] = "save"
+            elif isinstance(ev, display.Key) and ev.char in ("q", "\x1b"):
+                touch["action"] = "cancel"
 
     while True:
         ret, frame = cap.read()
@@ -169,8 +170,9 @@ def run_wizard(cap, actual_w, actual_h, win, cal_path, gpio_ok, gpio_in):
                         (bx + (bw3 - tw) // 2, BTN_Y + (BTN_H + th) // 2),
                         FONT, 0.7, C["white"], 2)
 
-        cv2.imshow(win, canvas)
-        cv2.waitKey(1)
+        display.show(canvas)
+        _drain_input()
+        time.sleep(0.005)
 
         action = touch["action"]; touch["action"] = None
 
@@ -235,8 +237,10 @@ def run_wizard(cap, actual_w, actual_h, win, cal_path, gpio_ok, gpio_in):
                             (130, 225), FONT, 0.9, C["white"], 2)
                 cv2.putText(ov, f"{count} pairs - ~30-60s on Pi",
                             (130, 265), FONT, 0.5, C["yellow"], 1)
-                cv2.imshow(win, ov)
-                cv2.waitKey(400)
+                display.show(ov)
+                # drain events so the dialog doesn't queue up taps
+                display.events()
+                time.sleep(0.4)
 
             if result["err"]:
                 msg, msg_col = f"Failed: {result['err'][:45]}", C["red"]
@@ -244,14 +248,14 @@ def run_wizard(cap, actual_w, actual_h, win, cal_path, gpio_ok, gpio_in):
                 rms = result["rms"]
                 rms_col = C["green"] if rms < 0.5 else C["yellow"] if rms < 1.5 else C["red"]
                 rms_lbl = "EXCELLENT" if rms < 0.5 else "OK" if rms < 1.5 else "POOR"
-                _show_rms(win, rms, rms_lbl, rms_col)
+                _show_rms(rms, rms_lbl, rms_col)
                 return result["cal"]
 
         elif action == "cancel":
             return None
 
 
-def _show_rms(win, rms, label, colour):
+def _show_rms(rms, label, colour):
     """Brief reprojection error report screen."""
     end = time.time() + 3.0
     while time.time() < end:
@@ -262,5 +266,6 @@ def _show_rms(win, rms, label, colour):
         cv2.putText(ov, f"Reprojection error: {rms:.3f} px",
                     (160, 225), FONT, 0.7, C["white"], 1)
         cv2.putText(ov, label, (160, 280), FONT, 1.2, colour, 3)
-        cv2.imshow(win, ov)
-        cv2.waitKey(50)
+        display.show(ov)
+        display.events()
+        time.sleep(0.05)

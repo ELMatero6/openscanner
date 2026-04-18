@@ -17,6 +17,7 @@ except Exception:
     GPIO_OK = False
 
 from . import __version__
+from . import display
 from . import logger as log_mod
 from . import settings as settings_mod
 from .calibration import load_calibration, rectify, run_wizard
@@ -147,36 +148,24 @@ def _ply_paths():
     )
 
 
-def _confirm_shutdown(win):
+def _confirm_shutdown():
     """Two-tap power-off confirmation."""
-    holder = {"cb": None, "state": None}
-    def setter(cb, state):
-        holder["cb"] = cb; holder["state"] = state
-        cv2.setMouseCallback(win, cb, state)
     action = confirm_dialog(
-        win,
         [("Shut down the scanner?", C["white"]),
          "Wait 5s after power-off LED stops blinking",
          "before unplugging power."],
         [("SHUT DOWN", C["red"], "yes"), ("CANCEL", C["dim"], "no")],
-        setter,
     )
     return action == "yes"
 
 
-def _save_destination(win):
+def _save_destination():
     """Ask LOCAL / USB / CANCEL."""
-    holder = {"cb": None, "state": None}
-    def setter(cb, state):
-        holder["cb"] = cb; holder["state"] = state
-        cv2.setMouseCallback(win, cb, state)
     return confirm_dialog(
-        win,
         [("Where do you want to save?", C["white"])],
         [("LOCAL ZIP", C["blue"], "local"),
          ("USB DRIVE", C["purple"], "usb"),
          ("CANCEL",    C["dim"],    "cancel")],
-        setter,
     )
 
 
@@ -202,12 +191,9 @@ def _do_local_zip(state, version, cal, log):
     threading.Thread(target=_bg, daemon=True).start()
 
 
-def _usb_format_confirm(win):
+def _usb_format_confirm():
     """Ask FORMAT / APPEND / CANCEL. Returns one of those keys."""
-    def setter(cb, st):
-        cv2.setMouseCallback(win, cb, st)
     return confirm_dialog(
-        win,
         [("USB drive options", C["white"]),
          "FORMAT wipes the drive first (FAT32).",
          "APPEND writes a new folder beside any",
@@ -215,31 +201,27 @@ def _usb_format_confirm(win):
         [("FORMAT",  C["red"],    "format"),
          ("APPEND",  C["blue"],   "append"),
          ("CANCEL",  C["dim"],    "cancel")],
-        setter,
     )
 
 
-def _do_usb_export(win, state, version, cal, log):
+def _do_usb_export(state, version, cal, log):
     """Detect + mount USB, optionally format, export, then eject. Async.
 
     The main loop watches state["usb_msg"] and shows the result dialog so
     the UI stays responsive during multi-minute copies.
     """
     dev, parent, mnt = usb_find_block_device()
-    def setter(cb, st):
-        cv2.setMouseCallback(win, cb, st)
 
     if not dev:
         log.warning("usb export: no drive detected")
-        confirm_dialog(win,
+        confirm_dialog(
             [("No USB drive detected", C["red"]),
              "Plug in a USB drive (FAT32/exFAT/ext4)",
              "and try again."],
-            [("OK", C["blue"], "ok")], setter)
+            [("OK", C["blue"], "ok")])
         return
 
-    choice = _usb_format_confirm(win)
-    cv2.setMouseCallback(win, lambda *a, **k: None, None)
+    choice = _usb_format_confirm()
     if choice == "cancel":
         log.info("usb export: cancelled by user")
         return
@@ -322,9 +304,7 @@ def run():
     live_m    = build_live_matcher()
     csv_path  = init_csv(SAVE_DIR)
 
-    WIN = "Scanner"
-    cv2.namedWindow(WIN, cv2.WINDOW_NORMAL)
-    cv2.setWindowProperty(WIN, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
+    display.init(SCREEN_W, SCREEN_H, title="openscanner")
 
     canvas = np.zeros((SCREEN_H, SCREEN_W, 3), np.uint8)
 
@@ -357,13 +337,17 @@ def run():
     coverage_acc = None
     coverage_cnt = 0
 
-    touch = {"action": None}
-    def on_touch(event, x, y, flags, param):
-        if event == cv2.EVENT_LBUTTONDOWN:
-            btn = hit_button(x, y)
-            if btn:
-                param["action"] = btn
-    cv2.setMouseCallback(WIN, on_touch, touch)
+    touch = {"action": None, "quit": False}
+    def _drain_input():
+        for ev in display.events():
+            if isinstance(ev, display.Tap):
+                btn = hit_button(ev.x, ev.y)
+                if btn:
+                    touch["action"] = btn
+            elif isinstance(ev, display.Quit):
+                touch["quit"] = True
+            elif isinstance(ev, display.Key) and ev.char in ("q", "\x1b"):
+                touch["quit"] = True
 
     last_auto       = 0.0
     gpio_was        = False
@@ -442,12 +426,14 @@ def run():
         if gpio_now and not gpio_was:
             gpio_press_time = now
         if gpio_now and (now - gpio_press_time) > SHUTDOWN_HOLD_S:
-            if _confirm_shutdown(WIN):
+            if _confirm_shutdown():
                 shutdown(); return
             gpio_press_time = now + 1e9
-            cv2.setMouseCallback(WIN, on_touch, touch)
         gpio_was = gpio_now
 
+        _drain_input()
+        if touch["quit"]:
+            break
         action = touch["action"]; touch["action"] = None
 
         if action == "dist":
@@ -477,8 +463,7 @@ def run():
             if state["captures"] == 0:
                 log.info("save: nothing to save")
             elif not state["saving"]:
-                dest = _save_destination(WIN)
-                cv2.setMouseCallback(WIN, on_touch, touch)
+                dest = _save_destination()
                 if dest == "local":
                     settings["last_save_dest"] = "local"
                     settings_mod.save(SETTINGS_FILE, settings)
@@ -486,7 +471,7 @@ def run():
                 elif dest == "usb":
                     settings["last_save_dest"] = "usb"
                     settings_mod.save(SETTINGS_FILE, settings)
-                    _do_usb_export(WIN, state, __version__, state["cal"], log)
+                    _do_usb_export(state, __version__, state["cal"], log)
 
         elif action == "clear":
             state["captures"] = 0
@@ -500,46 +485,39 @@ def run():
             init_csv(SAVE_DIR)
 
         elif action == "cal":
-            new_cal = run_wizard(cap, actual_w, actual_h, WIN,
+            new_cal = run_wizard(cap, actual_w, actual_h,
                                  CALIBRATION_FILE, GPIO_OK, _gpio_low)
-            cv2.setMouseCallback(WIN, on_touch, touch)
             if new_cal:
                 state["cal"] = new_cal
                 state["baseline_mm"] = new_cal["baseline_mm"]
 
         elif action == "view":
             paths = _ply_paths()
-            viewer.show(WIN, paths,
+            viewer.show(paths,
                         max_points=settings.get("viewer_subsample", 60000))
-            cv2.setMouseCallback(WIN, on_touch, touch)
 
         elif action == "power":
-            if _confirm_shutdown(WIN):
+            if _confirm_shutdown():
                 shutdown(); return
-            cv2.setMouseCallback(WIN, on_touch, touch)
 
         # Show the result dialog for an async save when the worker finishes.
         # We only pop this when saving is False so progress overlay stays smooth.
         if not state["saving"]:
-            def _setter(cb, st):
-                cv2.setMouseCallback(WIN, cb, st)
             if "usb_msg" in state:
                 ok, msg = state.pop("usb_msg")
-                confirm_dialog(WIN,
+                confirm_dialog(
                     [(("Export complete!" if ok else "Export failed"),
                       C["green"] if ok else C["red"]),
                      msg,
                      ("Safe to unplug USB drive." if ok else "")],
-                    [("OK", C["blue"], "ok")], _setter)
-                cv2.setMouseCallback(WIN, on_touch, touch)
+                    [("OK", C["blue"], "ok")])
             elif "zip_msg" in state:
                 ok, msg = state.pop("zip_msg")
-                confirm_dialog(WIN,
+                confirm_dialog(
                     [(("Zip complete!" if ok else "Zip failed"),
                       C["green"] if ok else C["red"]),
                      (os.path.basename(msg) if ok else msg)],
-                    [("OK", C["blue"], "ok")], _setter)
-                cv2.setMouseCallback(WIN, on_touch, touch)
+                    [("OK", C["blue"], "ok")])
 
         # Capture trigger - only when we have fresh L/R frames
         do_capture = False
@@ -590,15 +568,14 @@ def run():
 
         sys_holder.setdefault("temp", None)
         draw_ui(canvas, state, left_panel, right_panel, sys_holder)
-        cv2.imshow(WIN, canvas)
+        display.show(canvas)
 
-        key = cv2.waitKey(1) & 0xFF
-        if key in (ord("q"), 27):
-            break
+        # Tiny sleep keeps CPU from pinning when frames are stale.
+        time.sleep(0.005)
 
     cam.stop()
     cap.release()
-    cv2.destroyAllWindows()
+    display.quit()
     if GPIO_OK:
         GPIO.cleanup()
     log.info("shutdown clean")

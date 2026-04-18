@@ -13,6 +13,8 @@ import time
 import cv2
 import numpy as np
 
+from . import display
+
 from .config import (
     BTN_H, BTN_W, BTN_Y, BTNS, C, DIST_PRESETS, FONT, MONO_FONT,
     NAV_3D_X, NAV_3D_W, NAV_CAL_X, NAV_CAL_W, NAV_PWR_X, NAV_PWR_W,
@@ -332,23 +334,15 @@ def hit_button(x, y):
 
 # ---------- modal dialog ----------------------------------------------------
 
-def confirm_dialog(win, lines, buttons, callback_setter):
+def confirm_dialog(lines, buttons):
     """Win9x-ish modal with title bar + buttons.
 
     buttons: list of (label, colour, action_key).
+    Drains its own input events; returns the chosen action_key.
     """
-    state = {"action": None}
+    action = None
 
-    def on_touch(event, x, y, flags, param):
-        if event != cv2.EVENT_LBUTTONDOWN or y < BTN_Y:
-            return
-        bw = SCREEN_W // len(buttons)
-        i = min(x // bw, len(buttons) - 1)
-        param["action"] = buttons[i][2]
-
-    callback_setter(on_touch, state)
-
-    while state["action"] is None:
+    while action is None:
         ov = np.full((SCREEN_H, SCREEN_W, 3), C["win_body"], np.uint8)
 
         # Dialog body
@@ -389,7 +383,13 @@ def confirm_dialog(win, lines, buttons, callback_setter):
                          by1 + ((by2 - by1) + th) // 2),
                         FONT, 0.7, C["white"], 2)
 
-        cv2.imshow(win, ov)
-        cv2.waitKey(50)
+        display.show(ov)
+        for ev in display.events():
+            if isinstance(ev, display.Tap) and ev.y >= BTN_Y:
+                bw = SCREEN_W // len(buttons)
+                i = min(ev.x // bw, len(buttons) - 1)
+                action = buttons[i][2]
+                break
+        time.sleep(0.04)
 
-    return state["action"]
+    return action
