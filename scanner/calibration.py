@@ -51,6 +51,49 @@ def rectify(left, right, cal):
     )
 
 
+def _find_corners_hq(gray, chess):
+    """High-quality corner detection on full-res grayscale.
+
+    Uses findChessboardCornersSB (sector-based, subpixel-accurate) when
+    available in the installed OpenCV build, otherwise falls back to the
+    classic findChessboardCorners + cornerSubPix with a wide window.
+    Returns (ok, corners_float32) where corners has shape (N, 1, 2).
+    """
+    if hasattr(cv2, "findChessboardCornersSB"):
+        flags = (cv2.CALIB_CB_NORMALIZE_IMAGE |
+                 cv2.CALIB_CB_EXHAUSTIVE |
+                 cv2.CALIB_CB_ACCURACY)
+        ok, corners = cv2.findChessboardCornersSB(gray, chess, flags)
+        if ok:
+            return True, corners.astype(np.float32)
+        return False, None
+
+    flags = (cv2.CALIB_CB_ADAPTIVE_THRESH |
+             cv2.CALIB_CB_NORMALIZE_IMAGE |
+             cv2.CALIB_CB_FILTER_QUADS)
+    ok, corners = cv2.findChessboardCorners(gray, chess, flags)
+    if not ok:
+        return False, None
+    crit = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 60, 1e-4)
+    refined = cv2.cornerSubPix(gray, corners, (21, 21), (-1, -1), crit)
+    return True, refined.astype(np.float32)
+
+
+def _per_pair_rms(objpts, ipts_L, ipts_R, mtxL, distL, mtxR, distR):
+    """Per-pair reprojection RMS in pixels, averaged over L + R corners."""
+    out = []
+    for i, op in enumerate(objpts):
+        _, rvL, tvL = cv2.solvePnP(op, ipts_L[i], mtxL, distL)
+        _, rvR, tvR = cv2.solvePnP(op, ipts_R[i], mtxR, distR)
+        pL, _ = cv2.projectPoints(op, rvL, tvL, mtxL, distL)
+        pR, _ = cv2.projectPoints(op, rvR, tvR, mtxR, distR)
+        eL = np.linalg.norm(pL.reshape(-1, 2) - ipts_L[i].reshape(-1, 2), axis=1)
+        eR = np.linalg.norm(pR.reshape(-1, 2) - ipts_R[i].reshape(-1, 2), axis=1)
+        out.append(float(np.sqrt(((eL ** 2).sum() + (eR ** 2).sum()) /
+                                  (len(eL) + len(eR)))))
+    return out
+
+
 def reprojection_error(objpts, ipts_L, ipts_R, mtxL, distL, mtxR, distR, R, T, sz):
     """Average reprojection error in pixels. < 0.5 is excellent, > 1.5 is poor."""
     rvecs_L, tvecs_L = [], []
@@ -177,13 +220,18 @@ def run_wizard(cap, actual_w, actual_h, cal_path, gpio_ok, gpio_in):
         action = touch["action"]; touch["action"] = None
 
         if action == "save":
-            if both and cL is not None and cR is not None:
-                gL_f = cv2.cvtColor(left,  cv2.COLOR_BGR2GRAY)
-                gR_f = cv2.cvtColor(right, cv2.COLOR_BGR2GRAY)
-                crit = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 30, 0.001)
-                cL2 = cv2.cornerSubPix(gL_f, cL, (11, 11), (-1, -1), crit)
-                cR2 = cv2.cornerSubPix(gR_f, cR, (11, 11), (-1, -1), crit)
-                objpts.append(objp); ipts_L.append(cL2); ipts_R.append(cR2)
+            # Re-detect on FULL-res grayscale with a proper detector. The
+            # live preview uses a fast low-res detector to keep the UI
+            # responsive, but its corners are only pixel-accurate at full
+            # res (~+/-2 px initial error) - cornerSubPix cannot always
+            # pull that in, and the leftover noise is exactly what
+            # produces 3-pixel RMS calibrations.
+            gL_f = cv2.cvtColor(left,  cv2.COLOR_BGR2GRAY)
+            gR_f = cv2.cvtColor(right, cv2.COLOR_BGR2GRAY)
+            okL, cL_hq = _find_corners_hq(gL_f, CHESS)
+            okR, cR_hq = _find_corners_hq(gR_f, CHESS)
+            if okL and okR:
+                objpts.append(objp); ipts_L.append(cL_hq); ipts_R.append(cR_hq)
                 cv2.imwrite(f"{CAL_DIR}/left/{count}.png",  left)
                 cv2.imwrite(f"{CAL_DIR}/right/{count}.png", right)
                 count += 1
@@ -191,7 +239,7 @@ def run_wizard(cap, actual_w, actual_h, cal_path, gpio_ok, gpio_in):
                        if count < MIN_PAIR else f"Saved pair {count}!  Ready to calibrate")
                 msg_col = C["green"]
             else:
-                msg, msg_col = "Board not detected in both eyes - hold still", C["red"]
+                msg, msg_col = "Corners failed full-res detection - hold steadier", C["red"]
 
         elif action == "calibrate":
             if count < MIN_PAIR:
@@ -203,10 +251,37 @@ def run_wizard(cap, actual_w, actual_h, cal_path, gpio_ok, gpio_in):
             def _compute():
                 try:
                     sz = (mid, actual_h)
-                    _, mtxL, distL, _, _ = cv2.calibrateCamera(objpts, ipts_L, sz, None, None)
-                    _, mtxR, distR, _, _ = cv2.calibrateCamera(objpts, ipts_R, sz, None, None)
+                    op, pL, pR = list(objpts), list(ipts_L), list(ipts_R)
+
+                    # Two-pass calibration: fit, find pairs whose per-pair
+                    # reprojection is > 2*mean (or worst 20%), drop them,
+                    # refit. One bad board frame can otherwise dominate
+                    # the mean RMS and ruin downstream depth.
+                    dropped = 0
+                    for iteration in range(2):
+                        _, mtxL, distL, _, _ = cv2.calibrateCamera(op, pL, sz, None, None)
+                        _, mtxR, distR, _, _ = cv2.calibrateCamera(op, pR, sz, None, None)
+
+                        if iteration == 0 and len(op) > 10:
+                            per = _per_pair_rms(op, pL, pR, mtxL, distL, mtxR, distR)
+                            log.info("per-pair RMS: %s",
+                                     " ".join(f"{e:.2f}" for e in per))
+                            thresh = max(2.0 * float(np.mean(per)),
+                                         float(np.percentile(per, 80)))
+                            keep = [i for i, e in enumerate(per) if e <= thresh]
+                            # Never drop below 10 pairs - stereo needs variety.
+                            if len(keep) >= 10 and len(keep) < len(op):
+                                dropped = len(op) - len(keep)
+                                op = [op[i] for i in keep]
+                                pL = [pL[i] for i in keep]
+                                pR = [pR[i] for i in keep]
+                                log.info("dropped %d high-RMS pairs (thresh=%.2f px)",
+                                         dropped, thresh)
+                                continue
+                        break
+
                     rms, _, _, _, _, R, T, _, _ = cv2.stereoCalibrate(
-                        objpts, ipts_L, ipts_R,
+                        op, pL, pR,
                         mtxL, distL, mtxR, distR, sz,
                         criteria=(cv2.TERM_CRITERIA_MAX_ITER + cv2.TERM_CRITERIA_EPS, 100, 1e-5),
                         flags=cv2.CALIB_FIX_INTRINSIC,
@@ -218,8 +293,12 @@ def run_wizard(cap, actual_w, actual_h, cal_path, gpio_ok, gpio_in):
                     save_calibration(cal_path,
                                      mtxL, distL, mtxR, distR, R, T,
                                      R1, R2, P1, P2, Q, sz, roi1, roi2, rms)
-                    result["rms"] = rms
-                    result["cal"] = load_calibration(cal_path, sz)
+                    log.info("stereoCalibrate RMS=%.3f px on %d pairs (dropped %d)",
+                             rms, len(op), dropped)
+                    result["rms"]     = rms
+                    result["dropped"] = dropped
+                    result["kept"]    = len(op)
+                    result["cal"]     = load_calibration(cal_path, sz)
                 except Exception as e:
                     result["err"] = str(e)
                 finally:
@@ -248,24 +327,29 @@ def run_wizard(cap, actual_w, actual_h, cal_path, gpio_ok, gpio_in):
                 rms = result["rms"]
                 rms_col = C["green"] if rms < 0.5 else C["yellow"] if rms < 1.5 else C["red"]
                 rms_lbl = "EXCELLENT" if rms < 0.5 else "OK" if rms < 1.5 else "POOR"
-                _show_rms(rms, rms_lbl, rms_col)
+                _show_rms(rms, rms_lbl, rms_col,
+                          kept=result.get("kept", 0),
+                          dropped=result.get("dropped", 0))
                 return result["cal"]
 
         elif action == "cancel":
             return None
 
 
-def _show_rms(rms, label, colour):
+def _show_rms(rms, label, colour, kept=0, dropped=0):
     """Brief reprojection error report screen."""
-    end = time.time() + 3.0
+    pairs_line = (f"Used {kept} pairs"
+                  + (f" (dropped {dropped} outliers)" if dropped else ""))
+    end = time.time() + 3.5
     while time.time() < end:
         ov = np.zeros((SCREEN_H, SCREEN_W, 3), np.uint8)
-        cv2.rectangle(ov, (60, 130), (740, 330), (25, 25, 25), -1)
-        cv2.rectangle(ov, (60, 130), (740, 330), C["white"], 1)
-        cv2.putText(ov, "Calibration complete", (160, 175), FONT, 0.8, C["white"], 2)
+        cv2.rectangle(ov, (60, 120), (740, 360), (25, 25, 25), -1)
+        cv2.rectangle(ov, (60, 120), (740, 360), C["white"], 1)
+        cv2.putText(ov, "Calibration complete", (160, 165), FONT, 0.8, C["white"], 2)
         cv2.putText(ov, f"Reprojection error: {rms:.3f} px",
-                    (160, 225), FONT, 0.7, C["white"], 1)
-        cv2.putText(ov, label, (160, 280), FONT, 1.2, colour, 3)
+                    (160, 215), FONT, 0.7, C["white"], 1)
+        cv2.putText(ov, label, (160, 275), FONT, 1.2, colour, 3)
+        cv2.putText(ov, pairs_line, (160, 325), FONT, 0.5, C["grey"], 1)
         display.show(ov)
         display.events()
         time.sleep(0.05)
