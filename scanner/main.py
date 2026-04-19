@@ -36,7 +36,9 @@ from .stereo import (
     build_live_matcher, build_matcher, compute_disparity,
     sample_disp_at,
 )
-from .sysinfo import cpu_temp, git_sha, shutdown, sys_stats
+from .sysinfo import (
+    apply_update, check_for_updates, cpu_temp, git_sha, shutdown, sys_stats,
+)
 from .ui import confirm_dialog, draw_ui, fit_to_panel, hit_button, make_empty_right_panel
 from . import viewer
 
@@ -302,8 +304,18 @@ def _ply_paths():
     )
 
 
+def _power_menu():
+    """Top-level power screen. Returns 'shutdown' | 'update' | 'cancel'."""
+    return confirm_dialog(
+        [("Power options", C["white"])],
+        [("SHUT DOWN",    C["red"],    "shutdown"),
+         ("CHECK UPDATES", C["blue"],  "update"),
+         ("CANCEL",       C["dim"],    "cancel")],
+    )
+
+
 def _confirm_shutdown():
-    """Two-tap power-off confirmation."""
+    """Final shutdown confirmation."""
     action = confirm_dialog(
         [("Shut down the scanner?", C["white"]),
          "Wait 5s after power-off LED stops blinking",
@@ -311,6 +323,62 @@ def _confirm_shutdown():
         [("SHUT DOWN", C["red"], "yes"), ("CANCEL", C["dim"], "no")],
     )
     return action == "yes"
+
+
+def _do_update_check(log):
+    """Run the check-for-updates flow. Blocks briefly on git fetch.
+
+    Returns True if the user asked us to install and we should exit for
+    a systemd-driven restart. Returns False otherwise (up to date, user
+    cancelled, or fetch failed).
+    """
+    log.info("update check: fetching origin")
+    ok, behind, branch, detail = check_for_updates()
+    if not ok:
+        log.warning("update check failed: %s", detail)
+        confirm_dialog(
+            [("Update check failed", C["red"]), detail or "unknown error"],
+            [("OK", C["blue"], "ok")],
+        )
+        return False
+
+    if behind == 0:
+        log.info("update check: already at origin/%s", branch)
+        confirm_dialog(
+            [("Already up to date", C["green"]),
+             f"On origin/{branch} @ {git_sha()}"],
+            [("OK", C["blue"], "ok")],
+        )
+        return False
+
+    log.info("update check: %d commit(s) behind origin/%s", behind, branch)
+    choice = confirm_dialog(
+        [(f"{behind} new commit{'s' if behind != 1 else ''} available",
+          C["green"]),
+         f"Branch: {branch}",
+         "Install now? The scanner will restart."],
+        [("INSTALL", C["blue"], "yes"), ("CANCEL", C["dim"], "no")],
+    )
+    if choice != "yes":
+        log.info("update: cancelled by user")
+        return False
+
+    pulled, detail = apply_update(branch)
+    if not pulled:
+        log.warning("update pull failed: %s", detail)
+        confirm_dialog(
+            [("Update failed", C["red"]), detail or "git pull failed"],
+            [("OK", C["blue"], "ok")],
+        )
+        return False
+
+    log.info("update: pulled, requesting restart")
+    confirm_dialog(
+        [("Update installed", C["green"]),
+         "Restarting now..."],
+        [("OK", C["blue"], "ok")],
+    )
+    return True
 
 
 def _save_destination():
@@ -633,8 +701,27 @@ def run():
                 worker.resume()
 
         elif action == "power":
-            if _confirm_shutdown():
-                shutdown(); return
+            # Pause stereo while a modal sequence runs on top of the UI.
+            worker.pause()
+            try:
+                choice = _power_menu()
+                if choice == "shutdown":
+                    if _confirm_shutdown():
+                        shutdown(); return
+                elif choice == "update":
+                    if _do_update_check(log):
+                        # New code is on disk; exit non-zero so systemd
+                        # (Restart=on-failure) relaunches us into the new
+                        # build. update.sh on the next boot will see we're
+                        # already up-to-date and skip the pull.
+                        log.info("exiting for restart into updated build")
+                        worker.stop(); cam.stop(); cap.release(); display.quit()
+                        if GPIO_OK:
+                            GPIO.cleanup()
+                        import sys
+                        sys.exit(42)
+            finally:
+                worker.resume()
 
         # Show the result dialog for an async save when the worker finishes.
         # We only pop this when saving is False so progress overlay stays smooth.

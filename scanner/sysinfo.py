@@ -73,3 +73,55 @@ def shutdown():
         subprocess.Popen(["sudo", "shutdown", "-h", "now"])
     except Exception as e:
         print(f"[SHUTDOWN] failed: {e}")
+
+
+# Install dir = repo root (one level above this file's package dir).
+_REPO_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def check_for_updates(timeout_s=15):
+    """Fetch origin and report how many commits we're behind.
+
+    Returns (ok, behind, branch, detail). On network failure or git error,
+    ok=False and detail holds a short, user-visible reason.
+    """
+    try:
+        fetch = subprocess.run(
+            ["git", "-C", _REPO_DIR, "fetch", "origin"],
+            capture_output=True, text=True, timeout=timeout_s,
+        )
+        if fetch.returncode != 0:
+            return False, 0, "", (fetch.stderr.strip().splitlines() or ["fetch failed"])[-1][:80]
+
+        branch = subprocess.run(
+            ["git", "-C", _REPO_DIR, "rev-parse", "--abbrev-ref", "HEAD"],
+            capture_output=True, text=True, timeout=5,
+        ).stdout.strip() or "main"
+
+        behind = subprocess.run(
+            ["git", "-C", _REPO_DIR, "rev-list", "--count",
+             f"HEAD..origin/{branch}"],
+            capture_output=True, text=True, timeout=5,
+        ).stdout.strip() or "0"
+
+        return True, int(behind), branch, ""
+    except subprocess.TimeoutExpired:
+        return False, 0, "", "timed out (offline?)"
+    except Exception as e:
+        return False, 0, "", str(e)[:80]
+
+
+def apply_update(branch, timeout_s=30):
+    """Fast-forward pull. Returns (ok, detail)."""
+    try:
+        r = subprocess.run(
+            ["git", "-C", _REPO_DIR, "pull", "--ff-only", "origin", branch],
+            capture_output=True, text=True, timeout=timeout_s,
+        )
+        if r.returncode != 0:
+            return False, (r.stderr.strip().splitlines() or ["pull failed"])[-1][:80]
+        return True, ""
+    except subprocess.TimeoutExpired:
+        return False, "pull timed out"
+    except Exception as e:
+        return False, str(e)[:80]
