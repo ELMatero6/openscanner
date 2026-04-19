@@ -97,8 +97,12 @@ def show(ply_paths, max_points=60000):
         idx = np.random.choice(len(xyz), max_points, replace=False)
         xyz, rgb = xyz[idx], rgb[idx]
 
-    # Initial scale: fit cloud into 80% of view height
-    span = float(np.percentile(np.linalg.norm(xyz, axis=1), 95)) or 1.0
+    # Initial scale: fit the BULK of the cloud into 80% of view height.
+    # Use the 75th percentile of the centred magnitudes - robust to the
+    # occasional far-field outlier that would otherwise collapse the
+    # scale and make the subject look like a dot at the origin.
+    mags = np.linalg.norm(xyz, axis=1)
+    span = float(np.percentile(mags, 75)) or 1.0
     base_scale = (VIEW_H * 0.4) / span
 
     state = {

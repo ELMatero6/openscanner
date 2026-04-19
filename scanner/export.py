@@ -115,20 +115,16 @@ def save_capture(save_dir, idx, left, right, disp, cal, state, csv_path):
     # PLY point cloud (only if calibrated - need Q matrix)
     ply_written = False
     if cal is not None:
-        # disp is at DISP_SCALE - need to scale Q's translation column
-        # Q = [[1,0,0,-cx],[0,1,0,-cy],[0,0,0,f],[0,0,-1/Tx,(cx-cx')/Tx]]
-        # Scaling intrinsics: cx,cy,f all multiply by s. New Q:
-        s = DISP_SCALE
-        Q_scaled = cal["Q"].copy()
-        Q_scaled[0, 3] *= s   # -cx
-        Q_scaled[1, 3] *= s   # -cy
-        Q_scaled[2, 3] *= s   # f
-        # Disparity also at scale s; Q[3,2] = -1/Tx is in original-pixel units.
-        # When disp is in scaled-pixel units, multiply by s to compensate:
-        Q_scaled[3, 2] *= s
-        # Use rectified left at matching scale for colour
-        left_small = cv2.resize(left, (disp.shape[1], disp.shape[0]))
-        xyz, rgb = disparity_to_points(disp, Q_scaled, left_small)
+        # SGBM runs at DISP_SCALE to keep the Pi fast; disp is in half-res
+        # pixels on a half-res grid. The calibration's Q matrix is in the
+        # original (full-res) geometry, so the cleanest fix is to convert
+        # the disparity map back to full-res space: upscale the image, and
+        # scale values by 1/s so they're in full-res pixels too. Then Q
+        # needs no rewriting - reprojectImageTo3D just works.
+        fh, fw = left.shape[:2]
+        disp_full = cv2.resize(disp, (fw, fh),
+                               interpolation=cv2.INTER_NEAREST) / DISP_SCALE
+        xyz, rgb = disparity_to_points(disp_full, cal["Q"], left)
         ply_path = os.path.join(save_dir, fnames["PLY"])
         ply_written = write_ply(ply_path, xyz, rgb)
 
