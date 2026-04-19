@@ -22,10 +22,10 @@ from . import logger as log_mod
 from . import settings as settings_mod
 from .calibration import load_calibration, rectify, run_wizard
 from .config import (
-    AUTO_INTERVAL, BTN_Y, C, CALIBRATION_FILE, CAMERA_INDEX,
-    CAPTURE_HEIGHT, CAPTURE_WIDTH, DEFAULT_BASELINE_MM, DIST_ORDER,
-    DIST_PRESETS, FONT, GPIO_PIN, PANEL_W, PREVIEW_H, SAVE_DIR,
-    SCREEN_H, SCREEN_W, SETTINGS_FILE, SHUTDOWN_HOLD_S, VF_H,
+    AUTO_INTERVAL, BLOCK_SIZE, BTN_Y, C, CALIBRATION_FILE, CAMERA_INDEX,
+    CAPTURE_HEIGHT, CAPTURE_WIDTH, DEFAULT_BASELINE_MM, FONT, GPIO_PIN,
+    NUM_DISP, PANEL_W, PREVIEW_H, SAVE_DIR, SCREEN_H, SCREEN_W,
+    SETTINGS_FILE, SHUTDOWN_HOLD_S, VF_H,
 )
 from .export import (
     fuse_plys, init_csv, save_capture, usb_export, usb_find_block_device,
@@ -123,8 +123,8 @@ class StereoWorker:
     """Runs the stereo pipeline off the main thread.
 
     pygame/SDL2 rendering has to stay on the main thread, but rectify +
-    SGBM + BG-mask do not. This worker pulls the latest frame from the
-    CameraReader, rectifies, computes live rf_disp, applies BG mask,
+    SGBM do not. This worker pulls the latest frame from the CameraReader,
+    rectifies, computes a live rangefinder disparity for the crosshair,
     builds the viewfinder panel, and publishes a snapshot for the main
     loop to blit.
 
@@ -202,20 +202,12 @@ class StereoWorker:
         # publish directly to `state` so draw_ui sees the fresh value.
         self.state["crosshair_dist_m"] = crosshair_m
 
-        bg_thresh = self.state.get("bg_thresh")
-        if bg_thresh is not None:
-            mask  = _bg_mask_from_rf(rf_disp, bg_thresh,
-                                     (left.shape[0], left.shape[1]))
-            left  = left  * mask[:, :, None]
-            right = right * mask[:, :, None]
-
         left_panel = fit_to_panel(left)
 
         with self._snap_lock:
             self._snap = {
                 "left":       left,
                 "right":      right,
-                "rf_disp":    rf_disp,
                 "left_panel": left_panel,
             }
 
@@ -258,42 +250,6 @@ class StereoWorker:
             self._t.join(timeout=1.0)
         except Exception:
             pass
-
-
-def _bg_mask_from_rf(rf_disp, bg_thresh, out_shape):
-    """Build a foreground mask from the cheap live disparity.
-
-    Covers the full viewfinder width, including the SGBM "invalid"
-    stripe on the left edge: SGBM leaves the leftmost ~num_disp columns
-    with disp=-1, so a naive threshold would chop off anything in that
-    strip. We propagate the first valid column's mask leftward to fill
-    it, so the mask follows the subject rather than the matcher's
-    blind spot.
-
-    The mask is then horizontally dilated to cover the right eye's
-    parallax-shifted view of the same object, and nearest-upscaled
-    to the full frame so we can apply it to both eyes before SGBM.
-    """
-    mask_lo = (rf_disp >= bg_thresh * 0.85).astype(np.uint8)
-
-    # Fill the SGBM-invalid left stripe (disp<0) by copying the first
-    # valid column across it. This is what stops the "one side cut off"
-    # artifact - the subject is preserved to the left edge of the frame.
-    valid_col = (rf_disp >= 0).any(axis=0)
-    if valid_col.any():
-        first = int(np.argmax(valid_col))
-        if first > 0:
-            mask_lo[:, :first] = mask_lo[:, first:first + 1]
-
-    # Horizontal dilation ~ max live-disparity so the right eye's
-    # shifted view of the object still falls inside the mask. 41 at
-    # 160 wide is about 25% - covers tight close-up subjects too.
-    kern = cv2.getStructuringElement(cv2.MORPH_RECT, (41, 7))
-    mask_lo = cv2.morphologyEx(mask_lo, cv2.MORPH_CLOSE, kern)
-    mask_lo = cv2.morphologyEx(mask_lo, cv2.MORPH_OPEN,
-                               cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3)))
-    h, w = out_shape
-    return cv2.resize(mask_lo, (w, h), interpolation=cv2.INTER_NEAREST)
 
 
 def _ply_paths():
@@ -521,19 +477,17 @@ def run():
 
     cal = load_calibration(CALIBRATION_FILE, (actual_w // 2, actual_h))
 
-    dist_mode = settings["dist_mode"] if settings["dist_mode"] in DIST_PRESETS else DIST_ORDER[0]
-    matcher   = build_matcher(**{k: DIST_PRESETS[dist_mode][k] for k in ("num_disp", "block")})
-    live_m    = build_live_matcher()
-    csv_path  = init_csv(SAVE_DIR)
+    matcher  = build_matcher(num_disp=NUM_DISP, block=BLOCK_SIZE)
+    live_m   = build_live_matcher()
+    csv_path = init_csv(SAVE_DIR)
 
     display.init(SCREEN_W, SCREEN_H, title="openscanner")
 
     canvas = np.zeros((SCREEN_H, SCREEN_W, 3), np.uint8)
 
     # `state` is the shared bus between the main thread and the stereo
-    # worker. Main writes most fields (cal, dist_mode, bg_thresh, matcher);
-    # worker reads them and publishes crosshair_dist_m back. Single-key
-    # dict writes are atomic under CPython so no lock is needed here.
+    # worker. Main writes cal / matcher; worker publishes crosshair_dist_m
+    # back. Single-key dict writes are atomic under CPython so no lock.
     state = {
         "cal":              cal,
         "matcher":          matcher,
@@ -543,8 +497,6 @@ def run():
         "zip_pct":          0,
         "flash_until":      0.0,
         "has_disp":         False,
-        "dist_mode":        dist_mode,
-        "bg_thresh":        None,
         "crosshair_dist_m": None,
         "version":          git_sha(),
         "baseline_mm":      cal["baseline_mm"] if cal else DEFAULT_BASELINE_MM,
@@ -585,7 +537,6 @@ def run():
     log.info("ready - entering capture loop")
 
     left_panel = make_empty_right_panel("Camera starting...", "")
-    rf_disp = np.zeros((120, 160), dtype=np.float32)
     heartbeat_t = time.time()
     heartbeat_frames = 0
 
@@ -597,7 +548,6 @@ def run():
         ret = snap is not None
         if ret:
             left_panel = snap["left_panel"]
-            rf_disp    = snap["rf_disp"]
 
         # Heartbeat every ~5s so we can spot stalls / drop in framerate
         heartbeat_frames += 1
@@ -625,32 +575,7 @@ def run():
             break
         action = touch["action"]; touch["action"] = None
 
-        if action == "dist":
-            i = DIST_ORDER.index(state["dist_mode"])
-            state["dist_mode"] = DIST_ORDER[(i + 1) % len(DIST_ORDER)]
-            p = DIST_PRESETS[state["dist_mode"]]
-            # Publish the new matcher through `state` so the worker picks
-            # it up on its next capture request.
-            state["matcher"] = build_matcher(p["num_disp"], p["block"])
-            settings["dist_mode"] = state["dist_mode"]
-            settings_mod.save(SETTINGS_FILE, settings)
-
-        elif action == "bgrem":
-            if state["bg_thresh"] is not None:
-                state["bg_thresh"] = None
-                settings["bg_on"] = False
-                log.info("bg removal: off")
-            else:
-                t = sample_disp_at(rf_disp, 0.5, 0.5, 0.08)
-                if t and t > 0:
-                    state["bg_thresh"] = t
-                    settings["bg_on"] = True
-                    log.info("bg removal: on (threshold=%.2f)", t)
-                else:
-                    log.warning("bg removal: no valid depth at crosshair")
-            settings_mod.save(SETTINGS_FILE, settings)
-
-        elif action == "save":
+        if action == "save":
             if state["captures"] == 0:
                 log.info("save: nothing to save")
             elif not state["saving"]:
@@ -783,8 +708,8 @@ def run():
             valid_px = int((save_disp > 0).sum())
             total_px = int(save_disp.size)
             cov = 100.0 * valid_px / max(total_px, 1)
-            log.info("capture #%d  coverage=%.1f%%  dist=%s  ply=%s",
-                     idx, cov, state["dist_mode"],
+            log.info("capture #%d  coverage=%.1f%%  ply=%s",
+                     idx, cov,
                      "yes" if meta and meta.get("PLY") and state["cal"] else "no")
 
         sys_holder.setdefault("temp", None)

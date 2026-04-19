@@ -38,22 +38,11 @@ NAV_CAL_X, NAV_CAL_W = 640, 160
 DEFAULT_BASELINE_MM = 60.0
 DISP_SCALE = 0.5
 
-# Scene-aware capture presets. Each tunes SGBM for the typical depth
-# range of that scene AND clips the exported point cloud so you don't
-# get a wedge of useless far-field garbage behind the subject.
-#   num_disp   bigger = can see closer things, slower capture
-#   block      smaller = finer detail, noisier; bigger = smoother, less detail
-#   max_depth  hard clip on the exported PLY (metres)
-#   min_depth  hard clip on the near side (metres)
-DIST_PRESETS = {
-    "INTERIOR": {"num_disp": 128, "block": 7, "label": "INTERIOR 0.5-5m",
-                 "min_depth": 0.4, "max_depth": 5.0},
-    "SMALL":    {"num_disp": 192, "block": 3, "label": "SMALL 0.2-1m",
-                 "min_depth": 0.15, "max_depth": 1.0},
-    "LARGE":    {"num_disp": 112, "block": 5, "label": "LARGE 0.5-3.5m",
-                 "min_depth": 0.4, "max_depth": 3.5},
-}
-DIST_ORDER = ["INTERIOR", "SMALL", "LARGE"]
+# Single SGBM preset. Intentionally un-fancy: no scene modes, no depth
+# clipping, no BG removal. Tune here if the scanner ever needs to target
+# a different subject size.
+NUM_DISP   = 128
+BLOCK_SIZE = 5
 
 FONT      = cv2.FONT_HERSHEY_SIMPLEX
 MONO_FONT = cv2.FONT_HERSHEY_PLAIN       # narrower, terminal-ish
@@ -89,13 +78,11 @@ C = {
     "black":       (0,   0,   0),
 }
 
-BTN_W = SCREEN_W // 4
 BTNS = [
-    ("dist",  "DIST",   "purple", "purple"),
-    ("bgrem", "BG OFF", "orange", "dim"),
     ("save",  "SAVE",   "yellow", "yellow"),
     ("clear", "CLEAR",  "red",    "dim"),
 ]
+BTN_W = SCREEN_W // len(BTNS)
 
 # Legacy aliases - unused in the new UI, kept because calibration.py imports them.
 CAL_W, CAL_H = 80, 34

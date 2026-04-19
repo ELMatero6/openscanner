@@ -16,7 +16,7 @@ import numpy as np
 from . import display
 
 from .config import (
-    BTN_H, BTN_W, BTN_Y, BTNS, C, DIST_PRESETS, FONT, MONO_FONT,
+    BTN_H, BTN_W, BTN_Y, BTNS, C, FONT, MONO_FONT,
     NAV_3D_X, NAV_3D_W, NAV_CAL_X, NAV_CAL_W, NAV_PWR_X, NAV_PWR_W,
     NAV_H, PANEL_W, PREVIEW_H, SCREEN_H, SCREEN_W, STATS_H, STATS_Y,
     TITLE_H, VF_H, VF_Y,
@@ -182,7 +182,7 @@ def _stats_strip(canvas, state, sys):
 
     rect = "RECT" if state.get("cal") else "RAW "
     base = (f" Shots:{state['captures']:<3d}  {rect}  "
-            f"{state['dist_mode']:<5}  v{state.get('version', '')}")
+            f"v{state.get('version', '')}")
     cv2.putText(canvas, base, (4, y2 - 6), MONO_FONT, 1.05,
                 C["olive_txt"], 1)
 
@@ -212,15 +212,10 @@ def _bottom_buttons(canvas, state):
         by2 = SCREEN_H - 6
 
         active = False
-        label = default_lbl
-        if key == "dist":
-            label = state["dist_mode"]; active = True
-        elif key == "bgrem":
-            active = state.get("bg_thresh") is not None
-            label = "BG ON" if active else "BG OFF"
-        elif key == "save":
+        label  = default_lbl
+        if key == "save":
             active = state.get("saving", False)
-            label = "SAVING..." if active else "SAVE"
+            label  = "SAVING..." if active else "SAVE"
 
         face = C["win_face"] if not active else (180, 210, 180)
         cv2.rectangle(canvas, (bx1, by1), (bx2, by2), face, -1)
@@ -229,16 +224,7 @@ def _bottom_buttons(canvas, state):
         (tw, th), _ = cv2.getTextSize(label, FONT, 0.72, 2)
         tx = bx1 + ((bx2 - bx1) - tw) // 2
         ty = by1 + ((by2 - by1) + th) // 2
-        if key == "dist":
-            ty -= 10
         cv2.putText(canvas, label, (tx, ty), FONT, 0.72, C["black"], 2)
-
-        if key == "dist":
-            rng = DIST_PRESETS[state["dist_mode"]]["label"]
-            (sw, _), _ = cv2.getTextSize(rng, FONT, 0.36, 1)
-            cv2.putText(canvas, rng,
-                        (bx1 + ((bx2 - bx1) - sw) // 2, by2 - 14),
-                        FONT, 0.36, C["win_sh"], 1)
 
 
 # ---------- top-level draw ---------------------------------------------------

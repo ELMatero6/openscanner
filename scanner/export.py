@@ -13,7 +13,7 @@ from datetime import datetime
 import cv2
 import numpy as np
 
-from .config import CALIBRATION_FILE, DISP_SCALE, SAVE_DIR
+from .config import BLOCK_SIZE, CALIBRATION_FILE, DISP_SCALE, NUM_DISP, SAVE_DIR
 from .stereo import XIMGPROC
 
 log = logging.getLogger("scanner.export")
@@ -23,8 +23,7 @@ CSV_HEADERS = [
     "capture", "timestamp",
     "file_L", "file_R", "file_D", "file_D_raw", "file_PLY",
     "img_w", "img_h",
-    "rectified", "dist_mode", "num_disp", "block_size",
-    "wls", "bg_removal",
+    "rectified", "num_disp", "block_size", "wls",
     "blur_score", "mean_disp", "coverage_pct",
     "valid_pixels", "total_pixels",
     "baseline_mm", "focal_px", "disp_scale",
@@ -47,17 +46,14 @@ def append_csv(csv_path, row):
         csv.writer(f).writerow([row.get(k, "") for k in CSV_HEADERS])
 
 
-def disparity_to_points(disp, Q, colour_img, min_distance_m=0.1, max_distance_m=5.0):
+def disparity_to_points(disp, Q, colour_img):
     """Reproject disparity to 3D points. Returns (Nx3 xyz_m, Nx3 rgb_uint8).
 
-    min_distance_m / max_distance_m come from the active scene preset so
-    e.g. SMALL mode doesn't stain the cloud with far-field noise from the
-    room behind the subject.
+    Plain: every valid (disp>0, finite, z>0) pixel ends up in the cloud,
+    no depth clipping. If you need to trim, do it in post.
     """
     pts3d = cv2.reprojectImageTo3D(disp, Q)
     mask = (disp > 0) & np.isfinite(pts3d[:, :, 2]) & (pts3d[:, :, 2] > 0)
-    mask &= pts3d[:, :, 2] < max_distance_m
-    mask &= pts3d[:, :, 2] > min_distance_m
     xyz = pts3d[mask]
     if colour_img.shape[:2] != disp.shape[:2]:
         colour_img = cv2.resize(colour_img, (disp.shape[1], disp.shape[0]))
@@ -106,13 +102,8 @@ def save_capture(save_dir, idx, left, right, disp, cal, state, csv_path):
     cv2.imwrite(os.path.join(save_dir, fnames["R"]), right)
 
     # Coloured heatmap (display)
-    from .config import DIST_ORDER, DIST_PRESETS
-    dist_mode = state.get("dist_mode")
-    if dist_mode not in DIST_PRESETS:
-        dist_mode = DIST_ORDER[0]
-    num_disp = DIST_PRESETS[dist_mode]["num_disp"]
-    clipped  = np.clip(disp, 0, num_disp)
-    norm     = (clipped / num_disp * 255).astype(np.uint8)
+    clipped  = np.clip(disp, 0, NUM_DISP)
+    norm     = (clipped / NUM_DISP * 255).astype(np.uint8)
     coloured = cv2.applyColorMap(norm, cv2.COLORMAP_TURBO)
     coloured[disp <= 0] = 0
     cv2.imwrite(os.path.join(save_dir, fnames["D"]), coloured)
@@ -137,12 +128,7 @@ def save_capture(save_dir, idx, left, right, disp, cal, state, csv_path):
         Q_scaled[3, 2] *= s
         # Use rectified left at matching scale for colour
         left_small = cv2.resize(left, (disp.shape[1], disp.shape[0]))
-        preset = DIST_PRESETS[dist_mode]
-        xyz, rgb = disparity_to_points(
-            disp, Q_scaled, left_small,
-            min_distance_m=preset["min_depth"],
-            max_distance_m=preset["max_depth"],
-        )
+        xyz, rgb = disparity_to_points(disp, Q_scaled, left_small)
         ply_path = os.path.join(save_dir, fnames["PLY"])
         ply_written = write_ply(ply_path, xyz, rgb)
 
@@ -155,7 +141,6 @@ def save_capture(save_dir, idx, left, right, disp, cal, state, csv_path):
     coverage   = round(valid_px / total_px * 100, 2)
     mean_disp  = round(float(disp[valid_mask].mean()) if valid_px > 0 else 0.0, 3)
 
-    p        = DIST_PRESETS[dist_mode]
     baseline = cal["baseline_mm"] if cal else state.get("baseline_mm", 60.0)
     focal    = cal["focal_px"]    if cal else 0.0
 
@@ -170,11 +155,9 @@ def save_capture(save_dir, idx, left, right, disp, cal, state, csv_path):
         "img_w":         left.shape[1],
         "img_h":         left.shape[0],
         "rectified":     1 if cal else 0,
-        "dist_mode":     dist_mode,
-        "num_disp":      p["num_disp"],
-        "block_size":    p["block"],
+        "num_disp":      NUM_DISP,
+        "block_size":    BLOCK_SIZE,
         "wls":           1 if XIMGPROC else 0,
-        "bg_removal":    1 if state.get("bg_thresh") is not None else 0,
         "blur_score":    blur,
         "mean_disp":     mean_disp,
         "coverage_pct":  coverage,

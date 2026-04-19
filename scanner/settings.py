@@ -5,8 +5,6 @@ import os
 import tempfile
 
 DEFAULTS = {
-    "dist_mode":      "SMALL",
-    "bg_on":          False,
     "auto_update":    True,
     "screen_rotate":  0,
     "last_save_dest": "local",
