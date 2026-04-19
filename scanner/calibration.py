@@ -124,7 +124,7 @@ def save_calibration(path, mtxL, distL, mtxR, distR, R, T, R1, R2, P1, P2, Q,
 def run_wizard(cap, actual_w, actual_h, cal_path, gpio_ok, gpio_in):
     """Touchscreen calibration wizard. Returns loaded calibration dict or None."""
     CHESS    = (9, 6)
-    SQ_M     = 0.025
+    SQ_M     = 0.02421
     CAL_DIR  = "cal_pairs"
     MIN_PAIR = 15
     os.makedirs(f"{CAL_DIR}/left",  exist_ok=True)
