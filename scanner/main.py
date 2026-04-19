@@ -117,6 +117,147 @@ class CameraReader:
             pass
 
 
+class StereoWorker:
+    """Runs the stereo pipeline off the main thread.
+
+    pygame/SDL2 rendering has to stay on the main thread, but rectify +
+    SGBM + BG-mask do not. This worker pulls the latest frame from the
+    CameraReader, rectifies, computes live rf_disp, applies BG mask,
+    builds the viewfinder panel, and publishes a snapshot for the main
+    loop to blit.
+
+    Capture trigger is asynchronous too: main calls request_capture(),
+    the worker runs the expensive full-res SGBM on its next frame, and
+    main picks up the result via poll_capture() to hand off to save.
+
+    Shared state flows through `state` (reads) and the internal lock
+    (snapshot + capture handoff). We intentionally NEVER touch pygame
+    or any SDL call from this thread.
+    """
+
+    def __init__(self, cam, state, live_m, actual_w):
+        self.cam         = cam
+        self.state       = state
+        self.live_m      = live_m
+        self.actual_half = actual_w // 2
+
+        self._snap_lock  = threading.Lock()
+        self._snap       = None
+
+        self._cap_lock   = threading.Lock()
+        self._cap_req    = False
+        self._cap_result = None
+
+        self._pause      = threading.Event()
+        self._stop       = False
+        self._t          = threading.Thread(target=self._loop, daemon=True,
+                                            name="stereo")
+        self._t.start()
+
+    def _loop(self):
+        rf_buffer = []
+        while not self._stop:
+            if self._pause.is_set():
+                time.sleep(0.05)
+                continue
+            frame, _age = self.cam.read(max_age=0.5)
+            if frame is None:
+                time.sleep(0.01)
+                continue
+            try:
+                self._process(frame, rf_buffer)
+            except Exception:
+                # Never let a bad frame kill the worker silently.
+                import traceback
+                traceback.print_exc()
+                time.sleep(0.05)
+
+    def _process(self, frame, rf_buffer):
+        mid   = frame.shape[1] // 2
+        left  = frame[:, :mid]
+        right = frame[:, mid:]
+
+        cal = self.state.get("cal")
+        if cal:
+            left, right = rectify(left, right, cal)
+
+        RF_W, RF_H = 160, 120
+        gl_rf = cv2.resize(cv2.cvtColor(left,  cv2.COLOR_BGR2GRAY), (RF_W, RF_H))
+        gr_rf = cv2.resize(cv2.cvtColor(right, cv2.COLOR_BGR2GRAY), (RF_W, RF_H))
+        rf_disp = self.live_m.compute(gl_rf, gr_rf).astype(np.float32) / 16.0
+
+        d_at_cross = sample_disp_at(rf_disp, 0.5, 0.5, 0.08)
+        if d_at_cross and d_at_cross > 0 and cal:
+            f_rf  = cal["focal_px"] * (RF_W / self.actual_half)
+            raw_m = (cal["baseline_mm"] / 1000.0 * f_rf) / d_at_cross
+            if 0.10 <= raw_m <= 8.0:
+                rf_buffer.append(raw_m)
+                if len(rf_buffer) > 8:
+                    rf_buffer.pop(0)
+        crosshair_m = (round(float(np.median(rf_buffer)), 2)
+                       if rf_buffer else None)
+        # Single-key dict writes are atomic under CPython's GIL, safe to
+        # publish directly to `state` so draw_ui sees the fresh value.
+        self.state["crosshair_dist_m"] = crosshair_m
+
+        bg_thresh = self.state.get("bg_thresh")
+        if bg_thresh is not None:
+            mask  = _bg_mask_from_rf(rf_disp, bg_thresh,
+                                     (left.shape[0], left.shape[1]))
+            left  = left  * mask[:, :, None]
+            right = right * mask[:, :, None]
+
+        left_panel = fit_to_panel(left)
+
+        with self._snap_lock:
+            self._snap = {
+                "left":       left,
+                "right":      right,
+                "rf_disp":    rf_disp,
+                "left_panel": left_panel,
+            }
+
+        do_capture = False
+        with self._cap_lock:
+            if self._cap_req:
+                self._cap_req = False
+                do_capture = True
+        if do_capture:
+            matcher = self.state.get("matcher")
+            if matcher is not None:
+                disp = compute_disparity(left, right, matcher)
+                with self._cap_lock:
+                    self._cap_result = (left.copy(), right.copy(), disp)
+
+    def latest(self):
+        with self._snap_lock:
+            return self._snap
+
+    def request_capture(self):
+        with self._cap_lock:
+            self._cap_req = True
+
+    def poll_capture(self):
+        with self._cap_lock:
+            r = self._cap_result
+            self._cap_result = None
+            return r
+
+    def pause(self):
+        """Freeze the worker so another consumer (wizard/viewer) owns cap."""
+        self._pause.set()
+
+    def resume(self):
+        self._pause.clear()
+
+    def stop(self):
+        self._stop = True
+        try:
+            self._t.join(timeout=1.0)
+        except Exception:
+            pass
+
+
 def _bg_mask_from_rf(rf_disp, bg_thresh, out_shape):
     """Build a foreground mask from the cheap live disparity.
 
@@ -321,8 +462,13 @@ def run():
 
     canvas = np.zeros((SCREEN_H, SCREEN_W, 3), np.uint8)
 
+    # `state` is the shared bus between the main thread and the stereo
+    # worker. Main writes most fields (cal, dist_mode, bg_thresh, matcher);
+    # worker reads them and publishes crosshair_dist_m back. Single-key
+    # dict writes are atomic under CPython so no lock is needed here.
     state = {
         "cal":              cal,
+        "matcher":          matcher,
         "mode":             "semi",
         "captures":         sum(1 for f in os.listdir(SAVE_DIR) if f.endswith("_L.png")),
         "saving":           False,
@@ -335,6 +481,8 @@ def run():
         "version":          git_sha(),
         "baseline_mm":      cal["baseline_mm"] if cal else DEFAULT_BASELINE_MM,
     }
+
+    worker = StereoWorker(cam, state, live_m, actual_w)
 
     sys_holder = {}
 
@@ -365,71 +513,31 @@ def run():
     last_auto       = 0.0
     gpio_was        = False
     gpio_press_time = 0.0
-    rf_buffer       = []
 
     log.info("ready - entering capture loop")
 
-    left = right = None
     left_panel = make_empty_right_panel("Camera starting...", "")
     rf_disp = np.zeros((120, 160), dtype=np.float32)
     heartbeat_t = time.time()
     heartbeat_frames = 0
 
     while True:
-        frame, frame_age = cam.read(max_age=0.5)
         now = time.time()
-        ret = frame is not None
-
+        # The worker does all the stereo work; main thread just reads its
+        # last snapshot for rendering. This is what keeps the UI fluid.
+        snap = worker.latest()
+        ret = snap is not None
         if ret:
-            mid   = frame.shape[1] // 2
-            left  = frame[:, :mid]
-            right = frame[:, mid:]
-
-            if state["cal"]:
-                left, right = rectify(left, right, state["cal"])
-
-            # Live rangefinder + BG mask source - cheap matcher at 160x120
-            RF_W, RF_H = 160, 120
-            gl_rf = cv2.resize(cv2.cvtColor(left,  cv2.COLOR_BGR2GRAY), (RF_W, RF_H))
-            gr_rf = cv2.resize(cv2.cvtColor(right, cv2.COLOR_BGR2GRAY), (RF_W, RF_H))
-            rf_disp = live_m.compute(gl_rf, gr_rf).astype(np.float32) / 16.0
-
-            # Distance at crosshair - resolution-independent sampling
-            d_at_cross = sample_disp_at(rf_disp, 0.5, 0.5, 0.08)
-            if d_at_cross and d_at_cross > 0 and state["cal"]:
-                # focal_px scales with image; at RF_W the focal is focal_full * RF_W/full
-                f_rf = state["cal"]["focal_px"] * (RF_W / (actual_w // 2))
-                raw_m = (state["cal"]["baseline_mm"] / 1000.0 * f_rf) / d_at_cross
-                if 0.10 <= raw_m <= 8.0:
-                    rf_buffer.append(raw_m)
-                    if len(rf_buffer) > 8:
-                        rf_buffer.pop(0)
-            if rf_buffer:
-                state["crosshair_dist_m"] = round(float(np.median(rf_buffer)), 2)
-            else:
-                state["crosshair_dist_m"] = None
-
-            # Pre-depth BG removal: mask BOTH full-res eyes from the cheap
-            # rf_disp. This way SGBM at capture time only sees foreground
-            # pixels (cleaner disparity, less background bleed) and the
-            # live viewfinder reflects exactly what will be saved.
-            if state["bg_thresh"] is not None:
-                mask = _bg_mask_from_rf(
-                    rf_disp, state["bg_thresh"], (left.shape[0], left.shape[1])
-                )
-                left  = left  * mask[:, :, None]
-                right = right * mask[:, :, None]
-
-            # Viewfinder = rectified (and possibly BG-masked) left eye
-            left_panel = fit_to_panel(left)
+            left_panel = snap["left_panel"]
+            rf_disp    = snap["rf_disp"]
 
         # Heartbeat every ~5s so we can spot stalls / drop in framerate
         heartbeat_frames += 1
         if now - heartbeat_t >= 5.0:
             fps = heartbeat_frames / (now - heartbeat_t)
             ok, fail = cam.stats()
-            log.info("heartbeat: fps=%.1f cam_age=%.2fs cam_ok=%d cam_fail=%d",
-                     fps, frame_age, ok, fail)
+            log.info("heartbeat: fps=%.1f cam_ok=%d cam_fail=%d",
+                     fps, ok, fail)
             heartbeat_t = now
             heartbeat_frames = 0
 
@@ -453,7 +561,9 @@ def run():
             i = DIST_ORDER.index(state["dist_mode"])
             state["dist_mode"] = DIST_ORDER[(i + 1) % len(DIST_ORDER)]
             p = DIST_PRESETS[state["dist_mode"]]
-            matcher = build_matcher(p["num_disp"], p["block"])
+            # Publish the new matcher through `state` so the worker picks
+            # it up on its next capture request.
+            state["matcher"] = build_matcher(p["num_disp"], p["block"])
             settings["dist_mode"] = state["dist_mode"]
             settings_mod.save(SETTINGS_FILE, settings)
 
@@ -498,16 +608,29 @@ def run():
             init_csv(SAVE_DIR)
 
         elif action == "cal":
-            new_cal = run_wizard(cap, actual_w, actual_h,
-                                 CALIBRATION_FILE, GPIO_OK, _gpio_low)
+            # Wizard owns `cap` directly for its own capture loop; pause
+            # the worker so they don't fight for frames on the same
+            # VideoCapture object.
+            worker.pause()
+            try:
+                new_cal = run_wizard(cap, actual_w, actual_h,
+                                     CALIBRATION_FILE, GPIO_OK, _gpio_low)
+            finally:
+                worker.resume()
             if new_cal:
                 state["cal"] = new_cal
                 state["baseline_mm"] = new_cal["baseline_mm"]
 
         elif action == "view":
-            paths = _ply_paths()
-            viewer.show(paths,
-                        max_points=settings.get("viewer_subsample", 60000))
+            # Viewer is a modal takeover; no point running stereo while
+            # nobody can see the viewfinder.
+            worker.pause()
+            try:
+                paths = _ply_paths()
+                viewer.show(paths,
+                            max_points=settings.get("viewer_subsample", 60000))
+            finally:
+                worker.resume()
 
         elif action == "power":
             if _confirm_shutdown():
@@ -532,19 +655,21 @@ def run():
                      (os.path.basename(msg) if ok else msg)],
                     [("OK", C["blue"], "ok")])
 
-        # Capture trigger - only when we have fresh L/R frames
-        do_capture = False
+        # Capture trigger - enqueue on the worker so full-res SGBM runs
+        # off the main thread. The worker snapshots L/R at the moment it
+        # picks up the request, so the capture reflects the live scene,
+        # not whatever frame main happened to be holding.
         if ret and state["mode"] == "semi" and gpio_trigger:
-            do_capture = True
+            worker.request_capture()
         elif ret and state["mode"] == "auto" and gpio_now and now - last_auto >= AUTO_INTERVAL:
-            do_capture = True
-
-        if do_capture:
             last_auto = now
-            disp = compute_disparity(left, right, matcher)
+            worker.request_capture()
 
-            # Coverage map
-            disp_pos = np.clip(disp, 0, None)
+        cap_result = worker.poll_capture()
+        if cap_result is not None:
+            save_left, save_right, save_disp = cap_result
+
+            disp_pos = np.clip(save_disp, 0, None)
             if coverage_acc is None:
                 coverage_acc = disp_pos.copy()
             else:
@@ -562,10 +687,6 @@ def run():
             cv2.putText(right_panel, f"Coverage  ({coverage_cnt} shots)",
                         (8, 20), FONT, 0.45, (255, 255, 255), 1)
             state["has_disp"] = True
-
-            # left/right are already BG-masked upstream via _bg_mask_from_rf,
-            # so disp was computed on masked inputs - nothing more to do here.
-            save_left, save_right, save_disp = left, right, disp
 
             idx = state["captures"] + 1
             meta = save_capture(SAVE_DIR, idx, save_left, save_right, save_disp,
@@ -586,6 +707,7 @@ def run():
         # Tiny sleep keeps CPU from pinning when frames are stale.
         time.sleep(0.005)
 
+    worker.stop()
     cam.stop()
     cap.release()
     display.quit()
