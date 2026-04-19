@@ -44,6 +44,14 @@ DISP_SCALE = 0.5
 NUM_DISP   = 128
 BLOCK_SIZE = 5
 
+# Per-capture PLY quality gates. Applied in disparity_to_points.
+# These keep garbage depth (window glare, textureless walls) out of the
+# point cloud at capture time. Nothing downstream can recover phantom
+# geometry, so we'd rather drop it here.
+MAX_DEPTH_M     = 4.0   # reject Z > this (kills sun/window streaks)
+MIN_DEPTH_M     = 0.10  # reject near-lens speckle
+MAX_BRIGHTNESS  = 245   # drop blown-out pixels (no valid stereo match there)
+
 FONT      = cv2.FONT_HERSHEY_SIMPLEX
 MONO_FONT = cv2.FONT_HERSHEY_PLAIN       # narrower, terminal-ish
 

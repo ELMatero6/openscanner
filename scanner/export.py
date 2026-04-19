@@ -13,7 +13,10 @@ from datetime import datetime
 import cv2
 import numpy as np
 
-from .config import BLOCK_SIZE, CALIBRATION_FILE, DISP_SCALE, NUM_DISP, SAVE_DIR
+from .config import (
+    BLOCK_SIZE, CALIBRATION_FILE, DISP_SCALE, MAX_BRIGHTNESS,
+    MAX_DEPTH_M, MIN_DEPTH_M, NUM_DISP, SAVE_DIR,
+)
 from .stereo import XIMGPROC
 
 log = logging.getLogger("scanner.export")
@@ -46,17 +49,29 @@ def append_csv(csv_path, row):
         csv.writer(f).writerow([row.get(k, "") for k in CSV_HEADERS])
 
 
-def disparity_to_points(disp, Q, colour_img):
+def disparity_to_points(disp, Q, colour_img,
+                        min_depth_m=MIN_DEPTH_M,
+                        max_depth_m=MAX_DEPTH_M,
+                        max_brightness=MAX_BRIGHTNESS):
     """Reproject disparity to 3D points. Returns (Nx3 xyz_m, Nx3 rgb_uint8).
 
-    Plain: every valid (disp>0, finite, z>0) pixel ends up in the cloud,
-    no depth clipping. If you need to trim, do it in post.
+    Applies quality gates to keep garbage depth out of the cloud:
+      - depth clamp (min/max Z): kills window/sun streaks to infinity
+        and near-lens speckle noise
+      - overexposure mask: drops pixels where any channel is blown out,
+        because stereo matching has no signal there and produces
+        essentially random disparity
     """
     pts3d = cv2.reprojectImageTo3D(disp, Q)
-    mask = (disp > 0) & np.isfinite(pts3d[:, :, 2]) & (pts3d[:, :, 2] > 0)
-    xyz = pts3d[mask]
     if colour_img.shape[:2] != disp.shape[:2]:
         colour_img = cv2.resize(colour_img, (disp.shape[1], disp.shape[0]))
+    z = pts3d[:, :, 2]
+    mask = (disp > 0) & np.isfinite(z) & (z > min_depth_m) & (z < max_depth_m)
+    if max_brightness < 255:
+        # BGR max per pixel - one blown channel is enough to reject
+        bright = colour_img.max(axis=2)
+        mask &= bright < max_brightness
+    xyz = pts3d[mask]
     rgb = cv2.cvtColor(colour_img, cv2.COLOR_BGR2RGB)[mask]
     return xyz.astype(np.float32), rgb.astype(np.uint8)
 
