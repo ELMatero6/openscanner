@@ -30,6 +30,7 @@ CSV_HEADERS = [
     "blur_score", "mean_disp", "coverage_pct",
     "valid_pixels", "total_pixels",
     "baseline_mm", "focal_px", "disp_scale",
+    "quat_w", "quat_x", "quat_y", "quat_z",
 ]
 
 
@@ -155,6 +156,9 @@ def save_capture(save_dir, idx, left, right, disp, cal, state, csv_path):
     baseline = cal["baseline_mm"] if cal else state.get("baseline_mm", 60.0)
     focal    = cal["focal_px"]    if cal else 0.0
 
+    q = state.get("imu_quat")
+    qw, qx, qy, qz = (q if q is not None else ("", "", "", ""))
+
     append_csv(csv_path, {
         "capture":       n,
         "timestamp":     datetime.now().isoformat(),
@@ -177,6 +181,10 @@ def save_capture(save_dir, idx, left, right, disp, cal, state, csv_path):
         "baseline_mm":   round(baseline, 2),
         "focal_px":      round(focal, 2),
         "disp_scale":    DISP_SCALE,
+        "quat_w":        qw if qw == "" else round(qw, 6),
+        "quat_x":        qx if qx == "" else round(qx, 6),
+        "quat_y":        qy if qy == "" else round(qy, 6),
+        "quat_z":        qz if qz == "" else round(qz, 6),
     })
 
     return fnames

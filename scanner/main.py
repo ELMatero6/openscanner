@@ -20,6 +20,7 @@ from . import __version__
 from . import display
 from . import logger as log_mod
 from . import settings as settings_mod
+from .imu import ImuReader
 from .calibration import load_calibration, rectify, run_wizard
 from .config import (
     AUTO_INTERVAL, BLOCK_SIZE, BTN_Y, C, CALIBRATION_FILE, CAMERA_INDEX,
@@ -474,6 +475,7 @@ def run():
     log.info("camera open: %dx%d", actual_w, actual_h)
 
     cam = CameraReader(cap)
+    imu = ImuReader()
 
     cal = load_calibration(CALIBRATION_FILE, (actual_w // 2, actual_h))
 
@@ -640,7 +642,7 @@ def run():
                         # build. update.sh on the next boot will see we're
                         # already up-to-date and skip the pull.
                         log.info("exiting for restart into updated build")
-                        worker.stop(); cam.stop(); cap.release(); display.quit()
+                        worker.stop(); cam.stop(); imu.stop(); cap.release(); display.quit()
                         if GPIO_OK:
                             GPIO.cleanup()
                         import sys
@@ -701,6 +703,7 @@ def run():
             state["has_disp"] = True
 
             idx = state["captures"] + 1
+            state["imu_quat"] = imu.latest()
             meta = save_capture(SAVE_DIR, idx, save_left, save_right, save_disp,
                                 state["cal"], state, csv_path)
             state["captures"] = idx
@@ -721,6 +724,7 @@ def run():
 
     worker.stop()
     cam.stop()
+    imu.stop()
     cap.release()
     display.quit()
     if GPIO_OK:
